@@ -1,7 +1,7 @@
 #!/usr/bin/make -f
 
 %:
-	dh_buildinfo
+	dh_buildinfo generate cat
 	dh $@
 
 override_dh_auto_configure:
