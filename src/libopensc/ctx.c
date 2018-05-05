@@ -448,7 +448,7 @@ static void *load_dynamic_driver(sc_context_t *ctx, void **dll, const char *name
 	const char *(*modversion)(void) = NULL;
 	const char *(**tmodv)(void) = &modversion;
 
-	if (name == NULL) { /* should not occurr, but... */
+	if (name == NULL) { /* should not occur, but... */
 		sc_log(ctx, "No module specified");
 		return NULL;
 	}
@@ -808,6 +808,7 @@ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
 	set_defaults(ctx, &opts);
 
 	if (0 != list_init(&ctx->readers)) {
+		sc_release_context(ctx);
 		return SC_ERROR_OUT_OF_MEMORY;
 	}
 	list_attributes_seeker(&ctx->readers, reader_list_seeker);
