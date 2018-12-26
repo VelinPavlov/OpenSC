@@ -253,7 +253,7 @@ static void print_common_flags(const struct sc_pkcs15_object *obj)
 {
 	const char *common_flags[] = {"private", "modifiable"};
 	unsigned int i;
-	printf("\tObject Flags   : [0x%X]", obj->flags);
+	printf("\tObject Flags   : [0x%02X]", obj->flags);
 	for (i = 0; i < NELEMENTS(common_flags); i++) {
 		if (obj->flags & (1 << i)) {
 			printf(", %s", common_flags[i]);
@@ -570,6 +570,8 @@ static int list_data_objects(void)
 		else {
 			printf("\tAuth ID:         %s\n", sc_pkcs15_print_id(&objs[i]->auth_id));
 		}
+
+		printf("\n");
 	}
 	return 0;
 }
@@ -618,7 +620,7 @@ static void print_prkey_info(const struct sc_pkcs15_object *obj)
 		printf("  Ref:0x%02X", prkey->key_reference);
 		if (obj->auth_id.len != 0)
 			printf("  AuthID:%s", sc_pkcs15_print_id(&obj->auth_id));
-		printf("\n\t     %-16.*s [0x%X", 16, obj->label, prkey->usage);
+		printf("\n\t     %-18.*s [0x%02X", (int) sizeof obj->label, obj->label, prkey->usage);
 		print_key_usages(prkey->usage);
 		printf("]");
 		return;
@@ -626,10 +628,10 @@ static void print_prkey_info(const struct sc_pkcs15_object *obj)
 
 	printf("Private %s Key [%.*s]\n", key_types[7 & obj->type], (int) sizeof obj->label, obj->label);
 	print_common_flags(obj);
-	printf("\tUsage          : [0x%X]", prkey->usage);
+	printf("\tUsage          : [0x%02X]", prkey->usage);
 	print_key_usages(prkey->usage);
 	printf("\n");
-	printf("\tAccess Flags   : [0x%X]", prkey->access_flags);
+	printf("\tAccess Flags   : [0x%02X]", prkey->access_flags);
 	print_key_access_flags(prkey->access_flags);
 	printf("\n");
 
@@ -639,7 +641,7 @@ static void print_prkey_info(const struct sc_pkcs15_object *obj)
 		printf("\tModLength      : %lu\n", (unsigned long)prkey->modulus_length);
 	else
 		printf("\tFieldLength    : %lu\n", (unsigned long)prkey->field_length);
-	printf("\tKey ref        : %d (0x%X)\n", prkey->key_reference, prkey->key_reference);
+	printf("\tKey ref        : %d (0x%02X)\n", prkey->key_reference, prkey->key_reference);
 	printf("\tNative         : %s\n", prkey->native ? "yes" : "no");
 	if (prkey->path.len || prkey->path.aid.len)
 		printf("\tPath           : %s\n", sc_print_path(&prkey->path));
@@ -699,7 +701,7 @@ static void print_pubkey_info(const struct sc_pkcs15_object *obj)
 		printf("  Ref:0x%02X", pubkey->key_reference);
 		if (obj->auth_id.len != 0)
 			printf("  AuthID:%s", sc_pkcs15_print_id(&obj->auth_id));
-		printf("  %15.*s [0x%X", (int) sizeof obj->label, obj->label, pubkey->usage);
+		printf("  %-18.*s [0x%02X", (int) sizeof obj->label, obj->label, pubkey->usage);
 		print_key_usages(pubkey->usage);
 		printf("]");
 		return;
@@ -707,11 +709,11 @@ static void print_pubkey_info(const struct sc_pkcs15_object *obj)
 
 	printf("Public %s Key [%.*s]\n", key_types[7 & obj->type], (int) sizeof obj->label, obj->label);
 	print_common_flags(obj);
-	printf("\tUsage          : [0x%X]", pubkey->usage);
+	printf("\tUsage          : [0x%02X]", pubkey->usage);
 	print_key_usages(pubkey->usage);
 	printf("\n");
 
-	printf("\tAccess Flags   : [0x%X]", pubkey->access_flags);
+	printf("\tAccess Flags   : [0x%02X]", pubkey->access_flags);
 	print_key_access_flags(pubkey->access_flags);
 	printf("\n");
 
@@ -731,7 +733,7 @@ static void print_pubkey_info(const struct sc_pkcs15_object *obj)
 		}
 	}
 
-	printf("\tKey ref        : %d (0x%X)\n", pubkey->key_reference,  pubkey->key_reference);
+	printf("\tKey ref        : %d (0x%02X)\n", pubkey->key_reference,  pubkey->key_reference);
 	printf("\tNative         : %s\n", pubkey->native ? "yes" : "no");
 	if (have_path)
 		printf("\tPath           : %s\n", sc_print_path(&pubkey->path));
@@ -823,7 +825,7 @@ static int read_public_key(void)
 out:
 	if (cert)
 		sc_pkcs15_free_certificate(cert);
-	else if (pubkey)
+	else
 		sc_pkcs15_free_pubkey(pubkey);
 
 	return r;
@@ -838,11 +840,11 @@ static void print_skey_info(const struct sc_pkcs15_object *obj)
 
 	printf("Secret %s Key [%.*s]\n", skey_types[7 & obj->type], (int) sizeof obj->label, obj->label);
 	print_common_flags(obj);
-	printf("\tUsage          : [0x%X]", skey->usage);
+	printf("\tUsage          : [0x%02X]", skey->usage);
 	print_key_usages(skey->usage);
 	printf("\n");
 
-	printf("\tAccess Flags   : [0x%X]", skey->access_flags);
+	printf("\tAccess Flags   : [0x%02X]", skey->access_flags);
 	print_key_access_flags(skey->access_flags);
 	printf("\n");
 
@@ -851,7 +853,7 @@ static void print_skey_info(const struct sc_pkcs15_object *obj)
 	printf("\tSize           : %lu bits\n", (unsigned long)skey->value_len);
 	printf("\tID             : %s\n", sc_pkcs15_print_id(&skey->id));
 	printf("\tNative         : %s\n", skey->native ? "yes" : "no");
-	printf("\tKey ref        : %d (0x%X)\n", skey->key_reference, skey->key_reference);
+	printf("\tKey ref        : %d (0x%02X)\n", skey->key_reference, skey->key_reference);
 
 	if (skey->path.len || skey->path.aid.len)
 		printf("\tPath           : %s\n", sc_print_path(&skey->path));
@@ -918,9 +920,9 @@ static void print_ssh_key(FILE *outf, const char * alg, struct sc_pkcs15_object 
 		}
 
 		if (obj->label[0] != '\0')
-			fprintf(outf,"ssh-%s %s %.*s\n", alg, uu, (int) sizeof obj->label, obj->label);
+			fprintf(outf,"%s %s %.*s\n", alg, uu, (int) sizeof obj->label, obj->label);
 		else
-			fprintf(outf,"ssh-%s %s\n", alg, uu);
+			fprintf(outf,"%s %s\n", alg, uu);
 	}
 	free(uu);
 	return;
@@ -982,6 +984,70 @@ static int read_ssh_key(void)
 		return 1;
 	}
 
+	if (pubkey->algorithm == SC_ALGORITHM_EC) {
+		// support only for NIST
+		// 'ssh-keygen -t ecdsa' allow only field lengths 256/384/521
+
+		static struct supported_ec_curves {
+			char *curve_name;
+			struct sc_object_id curve_oid;
+			size_t size;
+		} ec_curves[] = {
+			{"secp256r1", {{1, 2, 840, 10045, 3, 1, 7, -1}},256},
+			{"secp384r1", {{1, 3, 132, 0, 34, -1}},         384},
+			{"secp521r1", {{1, 3, 132, 0, 35, -1}},         521},
+		        {NULL, {{-1}}, 0},
+		};
+		char alg[20];
+		/* Large enough to fit the following:
+		 * 3 x 4B item length headers
+		 * max 20B algorithm name, 9B curve name, max 256B key data */
+		unsigned char buf[300];
+		unsigned int i, len, tmp, n;
+
+		for (n = 0,i = 0; ec_curves[i].curve_name != NULL; i++) {
+			if(sc_compare_oid (&ec_curves[i].curve_oid,&pubkey->u.ec.params.id))
+				n = ec_curves[i].size;
+		}
+		if (!n) {
+			fprintf(stderr, "Unsupported curve\n");
+			goto fail2;
+		}
+		if (n != pubkey->u.ec.params.field_length) {
+			fprintf(stderr, "Wrong field length\n");
+			goto fail2;
+		}
+
+		buf[0] = 0;
+		buf[1] = 0;
+		buf[2] = 0;
+		len = snprintf((char *) buf+4, 20, "ecdsa-sha2-nistp%d", n);
+		strncpy(alg, (char *) buf+4, 19);
+		buf[3] = len;
+
+		len += 4;
+		buf[len++] = 0;
+		buf[len++] = 0;
+		buf[len++] = 0;
+		tmp = snprintf((char *) buf+len+1, 9, "nistp%d", n);
+		buf[len++] = tmp;
+		len += tmp;
+
+		n = pubkey->u.ec.ecpointQ.len;
+		if(n > 255) {
+			fprintf(stderr, "Wrong public key length\n");
+			goto fail2;
+		}
+		buf[len++] = 0;
+		buf[len++] = 0;
+		buf[len++] = 0;
+		buf[len++] = n & 0xff;
+		memcpy(buf+len,pubkey->u.ec.ecpointQ.value,n);
+		len += n;
+
+		print_ssh_key(outf, alg, obj, buf, len);
+	}
+
 	if (pubkey->algorithm == SC_ALGORITHM_RSA) {
 		unsigned char buf[2048];
 		uint32_t len, n;
@@ -1034,7 +1100,7 @@ static int read_ssh_key(void)
 		memcpy(buf+len,pubkey->u.rsa.modulus.data, pubkey->u.rsa.modulus.len);
 		len += pubkey->u.rsa.modulus.len;
 
-		print_ssh_key(outf, "rsa", obj, buf, len);
+		print_ssh_key(outf, "ssh-rsa", obj, buf, len);
 	}
 
 	if (pubkey->algorithm == SC_ALGORITHM_DSA) {
@@ -1125,14 +1191,14 @@ static int read_ssh_key(void)
 		memcpy(buf+len,pubkey->u.dsa.pub.data, pubkey->u.dsa.pub.len);
 		len += pubkey->u.dsa.pub.len;
 
-		print_ssh_key(outf, "dss", obj, buf, len);
+		print_ssh_key(outf, "ssh-dss", obj, buf, len);
 	}
 
 	if (outf != stdout)
 		fclose(outf);
 	if (cert)
 		sc_pkcs15_free_certificate(cert);
-	else if (pubkey)
+	else
 		sc_pkcs15_free_pubkey(pubkey);
 	return 0;
 fail:
@@ -1142,7 +1208,7 @@ fail2:
 		fclose(outf);
 	if (cert)
 		sc_pkcs15_free_certificate(cert);
-	else if (pubkey)
+	else
 		sc_pkcs15_free_pubkey(pubkey);
 	return SC_ERROR_OUT_OF_MEMORY;
 }
@@ -1608,7 +1674,7 @@ static void list_info(void)
 			count++;
 		}
 	}
-	printf("\n");
+	printf((compact) ? "\n" : "\n\n");
 }
 
 static int dump(void)

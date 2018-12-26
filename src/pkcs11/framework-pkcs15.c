@@ -21,15 +21,17 @@
 #include "config.h"
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "libopensc/log.h"
 #include "libopensc/internal.h"
 #include "libopensc/asn1.h"
 #include "libopensc/cardctl.h"
 #include "ui/notify.h"
 #include "common/compat_strnlen.h"
-
 #ifdef ENABLE_OPENSSL
-#include <openssl/opensslv.h>
+#include <openssl/sha.h>
+#else
+#define SHA_DIGEST_LENGTH	20
 #endif
 
 #include "sc-pkcs11.h"
@@ -131,9 +133,10 @@ struct pkcs15_skey_object {
 	struct sc_pkcs15_skey *valueXXXX;
 };
 
+#define is_skey(obj) ((__p15_type(obj) & SC_PKCS15_TYPE_CLASS_MASK) == SC_PKCS15_TYPE_SKEY)
+
 #define skey_flags	base.base.flags
 #define skey_p15obj	base.p15_object
-#define is_skey(obj)	((__p15_type(obj) & SC_PKCS15_TYPE_CLASS_MASK) == SC_PKCS15_TYPE_SKEY_OBJECT)
 
 extern struct sc_pkcs11_object_ops pkcs15_cert_ops;
 extern struct sc_pkcs11_object_ops pkcs15_prkey_ops;
@@ -365,7 +368,7 @@ pkcs15_unbind(struct sc_pkcs11_card *p11card)
 
 		unlock_card(fw_data);
 
-		if (fw_data->p15_card) {
+		if (fw_data->p15_card && fw_data->p15_card->card) {
 			if (idx == 0) {
 				int rc = sc_detect_card_presence(fw_data->p15_card->card->reader);
 				if (rc <= 0 || rc & SC_READER_CARD_CHANGED) {
@@ -395,8 +398,6 @@ pkcs15_init_token_info(struct sc_pkcs15_card *p15card, CK_TOKEN_INFO_PTR pToken)
 	scconf_block *conf_block = NULL;
 	char *model = NULL;
 
-	strcpy_bp(pToken->manufacturerID, p15card->tokeninfo->manufacturer_id, 32);
-
 	conf_block = sc_get_conf_block(p15card->card->ctx, "framework", "pkcs15", 1);
 	if (conf_block && p15card->file_app)   {
 		scconf_block **blocks = NULL;
@@ -419,16 +420,23 @@ pkcs15_init_token_info(struct sc_pkcs15_card *p15card, CK_TOKEN_INFO_PTR pToken)
 	else
 		strcpy_bp(pToken->model, "PKCS#15", sizeof(pToken->model));
 
-	/* Take the last 16 chars of the serial number (if the are more than 16).
-	 * _Assuming_ that the serial number is a Big Endian counter, this
-	 * will assure that the serial within each type of card will be
-	 * unique in pkcs11 (at least for the first 8^16 cards :-) */
-	if (p15card->tokeninfo->serial_number != NULL) {
-		int sn_start = strlen(p15card->tokeninfo->serial_number) - 16;
+	if (p15card->tokeninfo) {
+		strcpy_bp(pToken->manufacturerID, p15card->tokeninfo->manufacturer_id, 32);
 
-		if (sn_start < 0)
-			sn_start = 0;
-		strcpy_bp(pToken->serialNumber, p15card->tokeninfo->serial_number + sn_start, 16);
+		/* Take the last 16 chars of the serial number (if the are more than 16).
+		 * _Assuming_ that the serial number is a Big Endian counter, this
+		 * will assure that the serial within each type of card will be
+		 * unique in pkcs11 (at least for the first 8^16 cards :-) */
+		if (p15card->tokeninfo->serial_number != NULL) {
+			size_t sn_start = strlen(p15card->tokeninfo->serial_number);
+
+			if (sn_start <= 16)
+				sn_start = 0;
+			else
+				sn_start -= 16;
+
+			strcpy_bp(pToken->serialNumber, p15card->tokeninfo->serial_number + sn_start, 16);
+		}
 	}
 
 	pToken->ulMaxSessionCount = CK_EFFECTIVELY_INFINITE;
@@ -450,7 +458,7 @@ static char *
 set_cka_label(CK_ATTRIBUTE_PTR attr, char *label)
 {
 	char *l = (char *)attr->pValue;
-	int len = attr->ulValueLen;
+	unsigned long len = attr->ulValueLen;
 
 	if (len >= SC_PKCS15_MAX_LABEL_SIZE)
 		len = SC_PKCS15_MAX_LABEL_SIZE-1;
@@ -558,8 +566,8 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
 	slot->token_info.flags &= ~(CKF_USER_PIN_COUNT_LOW|CKF_USER_PIN_FINAL_TRY|CKF_USER_PIN_LOCKED);
 	auth = slot_data_auth(slot->fw_data);
 	sc_log(context,
-	       "C_GetTokenInfo() auth. object %p, token-info flags 0x%lX", auth,
-	       slot->token_info.flags);
+		"C_GetTokenInfo() auth. object %p, token-info flags 0x%lX", auth,
+		slot->token_info.flags);
 	if (auth) {
 		pin_info = (struct sc_pkcs15_auth_info*) auth->data;
 
@@ -705,7 +713,6 @@ __pkcs15_create_pubkey_object(struct pkcs15_fw_data *fw_data,
 	struct sc_pkcs15_pubkey *p15_key = NULL;
 	int rv;
 
-	sc_log(context, "__pkcs15_create_pubkey_object() called, pubkey %p, data %p", pubkey, pubkey->data);
 	/* Read public key from card */
 	/* Attempt to read pubkey from card or file.
 	 * During initialization process, the key may have been created
@@ -747,7 +754,6 @@ __pkcs15_create_pubkey_object(struct pkcs15_fw_data *fw_data,
 	if (pubkey_object != NULL)
 		*pubkey_object = (struct pkcs15_any_object *) object;
 
-	sc_log(context, "__pkcs15_create_pubkey_object() returns pubkey object %p", object);
 	return rv;
 }
 
@@ -781,8 +787,8 @@ __pkcs15_create_data_object(struct pkcs15_fw_data *fw_data,
 	rv = __pkcs15_create_object(fw_data, (struct pkcs15_any_object **) &dobj,
 			object, &pkcs15_dobj_ops, sizeof(struct pkcs15_data_object));
 	if (rv >= 0)   {
-	    dobj->info = (struct sc_pkcs15_data_info *) object->data;
-	    dobj->value = NULL;
+		dobj->info = (struct sc_pkcs15_data_info *) object->data;
+		dobj->value = NULL;
 	}
 
 	if (data_object != NULL)
@@ -792,7 +798,6 @@ __pkcs15_create_data_object(struct pkcs15_fw_data *fw_data,
 }
 
 
-#ifdef USE_PKCS15_INIT
 static int
 __pkcs15_create_secret_key_object(struct pkcs15_fw_data *fw_data,
 		struct sc_pkcs15_object *object, struct pkcs15_any_object **skey_object)
@@ -803,14 +808,13 @@ __pkcs15_create_secret_key_object(struct pkcs15_fw_data *fw_data,
 	rv = __pkcs15_create_object(fw_data, (struct pkcs15_any_object **) &skey,
 			object, &pkcs15_skey_ops, sizeof(struct pkcs15_skey_object));
 	if (rv >= 0)
-	    skey->info = (struct sc_pkcs15_skey_info *) object->data;
+		skey->info = (struct sc_pkcs15_skey_info *) object->data;
 
 	if (skey_object != NULL)
 		*skey_object = (struct pkcs15_any_object *) skey;
 
 	return 0;
 }
-#endif
 
 
 static int
@@ -902,7 +906,7 @@ __pkcs15_cert_bind_related(struct pkcs15_fw_data *fw_data, struct pkcs15_cert_ob
 			if (c1->issuer_len == c2->subject_len
 			 && !memcmp(c1->issuer, c2->subject, c1->issuer_len)) {
 				sc_log(context, "Associating object %d (id %s) as issuer",
-				         i, sc_pkcs15_print_id(&cert2->cert_info->id));
+						i, sc_pkcs15_print_id(&cert2->cert_info->id));
 				cert->cert_issuer = (struct pkcs15_cert_object *) obj;
 				return;
 			}
@@ -996,7 +1000,7 @@ pkcs15_add_object(struct sc_pkcs11_slot *slot, struct pkcs15_any_object *obj,
 
 	list_append(&slot->objects, obj);
 	sc_log(context, "Slot:%lX Setting object handle of 0x%lx to 0x%lx",
-	       slot->id, obj->base.handle, handle);
+		   slot->id, obj->base.handle, handle);
 	obj->base.handle = handle;
 	obj->base.flags |= SC_PKCS11_OBJECT_SEEN;
 	obj->refcount++;
@@ -1044,7 +1048,9 @@ pkcs15_init_slot(struct sc_pkcs15_card *p15card, struct sc_pkcs11_slot *slot,
 {
 	struct pkcs15_slot_data *fw_data;
 	struct sc_pkcs15_auth_info *pin_info = NULL;
-	char label[(sizeof auth->label) + 10];
+	char label[sizeof(auth->label) + sizeof(p15card->tokeninfo->label) + 10];
+	int write_protected;
+	scconf_block *atrblock;
 
 	sc_log(context, "Called");
 	pkcs15_init_token_info(p15card, &slot->token_info);
@@ -1057,6 +1063,19 @@ pkcs15_init_slot(struct sc_pkcs15_card *p15card, struct sc_pkcs11_slot *slot,
 
 	if (p15card->card->caps & SC_CARD_CAP_RNG && p15card->card->ops->get_challenge != NULL)
 		slot->token_info.flags |= CKF_RNG;
+
+	if (p15card->tokeninfo && p15card->tokeninfo->flags & SC_PKCS15_TOKEN_READONLY) {
+		write_protected = 1;
+	} else {
+		write_protected = 0;
+	}
+	atrblock = _sc_match_atr_block(p15card->card->ctx, NULL, &p15card->card->atr);
+	if (atrblock) {
+		write_protected = scconf_get_bool(atrblock, "read_only", write_protected);
+	}
+	if (write_protected) {
+		slot->token_info.flags |= CKF_WRITE_PROTECTED;
+	}
 
 	slot->fw_data = fw_data = calloc(1, sizeof(*fw_data));
 	if (!fw_data) {
@@ -1071,11 +1090,19 @@ pkcs15_init_slot(struct sc_pkcs15_card *p15card, struct sc_pkcs11_slot *slot,
 			pin_info = NULL;
 		}
 		else   {
-			if (auth->label[0] && strncmp(auth->label, "PIN", 4) != 0)
+			if (auth->label[0] && strncmp(auth->label, "PIN", 4) != 0) {
+				/* Trim tokeninfo->label to make right parenthesis visible */
+				char tokeninfo_label[sizeof(p15card->tokeninfo->label)+1];
+				int len;
+				snprintf(tokeninfo_label, sizeof(tokeninfo_label), "%s", p15card->tokeninfo->label);
+				tokeninfo_label[sizeof(tokeninfo_label)-1] = '\0';
+				for (len = strlen(tokeninfo_label) - 1; len >= 0 && isspace(tokeninfo_label[len]); len--) {
+					tokeninfo_label[len] = 0;
+				}
 				snprintf(label, sizeof(label), "%.*s (%s)",
 					(int) sizeof(auth->label), auth->label,
-					p15card->tokeninfo->label);
-			else
+					tokeninfo_label);
+			} else
 				/* The PIN label is empty or says just non-useful "PIN" */
 				snprintf(label, sizeof(label), "%s", p15card->tokeninfo->label);
 			slot->token_info.flags |= CKF_LOGIN_REQUIRED;
@@ -1107,9 +1134,8 @@ pkcs15_create_slot(struct sc_pkcs11_card *p11card, struct pkcs15_fw_data *fw_dat
 		struct sc_pkcs11_slot **out)
 {
 	struct sc_pkcs11_slot *slot = NULL;
-	int rv;
+	CK_RV rv;
 
-	sc_log(context, "Create slot (p11card %p, fw_data %p, auth %p, app_info %p)", p11card, fw_data, auth, app_info);
 	rv = slot_allocate(&slot, p11card);
 	if (rv != CKR_OK)
 		return rv;
@@ -1120,6 +1146,11 @@ pkcs15_create_slot(struct sc_pkcs11_card *p11card, struct pkcs15_fw_data *fw_dat
 	/* Fill in the slot/token info from pkcs15 data */
 	if (fw_data)
 		pkcs15_init_slot(fw_data->p15_card, slot, auth, app_info);
+	else {
+		/* Token is not initialized, announce pinpad capability nevertheless */
+		if (slot->reader->capabilities & SC_READER_CAP_PIN_PAD)
+			slot->token_info.flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
+	}
 
 	*out = slot;
 	return CKR_OK;
@@ -1168,6 +1199,11 @@ _pkcs15_create_typed_objects(struct pkcs15_fw_data *fw_data)
 
 	rv = pkcs15_create_pkcs11_objects(fw_data, SC_PKCS15_TYPE_DATA_OBJECT, "data object",
 			__pkcs15_create_data_object);
+	if (rv < 0)
+		return rv;
+
+	rv = pkcs15_create_pkcs11_objects(fw_data, SC_PKCS15_TYPE_SKEY_GENERIC, "Generic secret key",
+			__pkcs15_create_secret_key_object);
 	if (rv < 0)
 		return rv;
 
@@ -1326,6 +1362,10 @@ _add_pin_related_objects(struct sc_pkcs11_slot *slot, struct sc_pkcs15_object *p
 			sc_log(context, "Slot:%p Adding cert object %d to PIN '%.*s'", slot, i, (int) sizeof pin_obj->label, pin_obj->label);
 			pkcs15_add_object(slot, obj, NULL);
 		}
+		else if (is_skey(obj)) {
+			sc_log(context, "Slot:%p Adding secret key object %d to PIN '%.*s'", slot, i, (int) sizeof pin_obj->label, pin_obj->label);
+			pkcs15_add_object(slot, obj, NULL);
+		}
 		else   {
 			sc_log(context, "Slot:%p Object %d skipped", slot, i);
 			continue;
@@ -1386,7 +1426,8 @@ pkcs15_create_tokens(struct sc_pkcs11_card *p11card, struct sc_app_info *app_inf
 	struct sc_pkcs15_object *auth_user_pin = NULL, *auth_sign_pin = NULL;
 	struct sc_pkcs11_slot *slot = NULL, *sign_slot = NULL;
 	unsigned int cs_flags = sc_pkcs11_conf.create_slots_flags;
-	int i, rv, idx;
+	CK_RV rv;
+	int rc, i, idx;
 
 	sc_log(context, "create PKCS#15 tokens; fws:%p,%p,%p", p11card->fws_data[0], p11card->fws_data[1], p11card->fws_data[2]);
 	sc_log(context, "create slots flags 0x%X", cs_flags);
@@ -1407,9 +1448,9 @@ pkcs15_create_tokens(struct sc_pkcs11_card *p11card, struct sc_app_info *app_inf
 	sc_log(context, "Flags:0x%X; Auth User/Sign PINs %p/%p", cs_flags, auth_user_pin, auth_sign_pin);
 
 	/* Add PKCS#15 objects of the known types to the framework data */
-	rv = _pkcs15_create_typed_objects(fw_data);
-	if (rv < 0)
-		return sc_to_cryptoki_error(rv, NULL);
+	rc = _pkcs15_create_typed_objects(fw_data);
+	if (rc < 0)
+		return sc_to_cryptoki_error(rc, NULL);
 	sc_log(context, "Found %d FW objects objects", fw_data->num_objects);
 
 	/* Create slots for all non-unblock, non-so PINs if:
@@ -1422,10 +1463,10 @@ pkcs15_create_tokens(struct sc_pkcs11_card *p11card, struct sc_app_info *app_inf
 
 		memset(auths, 0, sizeof(auths));
 		/* Get authentication PKCS#15 objects present in the associated on-card application */
-		rv = sc_pkcs15_get_objects(fw_data->p15_card, SC_PKCS15_TYPE_AUTH_PIN, auths, SC_PKCS15_MAX_PINS);
-		if (rv < 0)
-			return sc_to_cryptoki_error(rv, NULL);
-		auth_count = rv;
+		rc = sc_pkcs15_get_objects(fw_data->p15_card, SC_PKCS15_TYPE_AUTH_PIN, auths, SC_PKCS15_MAX_PINS);
+		if (rc < 0)
+			return sc_to_cryptoki_error(rc, NULL);
+		auth_count = rc;
 		sc_log(context, "Found %d authentication objects", auth_count);
 
 		for (i = 0; i < auth_count; i++) {
@@ -1472,7 +1513,6 @@ pkcs15_create_tokens(struct sc_pkcs11_card *p11card, struct sc_app_info *app_inf
 			_add_pin_related_objects(sign_slot, auth_sign_pin, fw_data, NULL);
 		}
 
-		sc_log(context, "slot %p, sign-slot %p\n", slot, sign_slot);
 		if (!slot && sign_slot)
 			slot = sign_slot;
 	}
@@ -1541,7 +1581,7 @@ pkcs15_login(struct sc_pkcs11_slot *slot, CK_USER_TYPE userType,
 			if (sc_pkcs11_conf.pin_unblock_style == SC_PKCS11_PIN_UNBLOCK_SO_LOGGED_INITPIN)   {
 				if (ulPinLen && ulPinLen < sizeof(fw_data->user_puk))   {
 					memcpy(fw_data->user_puk, pPin, ulPinLen);
-					fw_data->user_puk_len = ulPinLen;
+					fw_data->user_puk_len = (unsigned int) ulPinLen;
 				}
 			}
 
@@ -1806,14 +1846,13 @@ pkcs15_initialize(struct sc_pkcs11_slot *slot, void *ptr,
 {
 	struct sc_pkcs11_card *p11card = slot->p11card;
 	struct sc_cardctl_pkcs11_init_token args;
-	scconf_block *atrblock = NULL;
+	scconf_block *conf_block = NULL;
 	int rc, enable_InitToken = 0;
 	CK_RV rv;
 
 	sc_log(context, "Get 'enable-InitToken' card configuration option");
-	atrblock = sc_match_atr_block(p11card->card->ctx, NULL, &p11card->reader->atr);
-	if (atrblock)
-		enable_InitToken = scconf_get_bool(atrblock, "pkcs11_enable_InitToken", 0);
+	conf_block = sc_get_conf_block(p11card->card->ctx, "framework", "pkcs15", 1);
+	enable_InitToken = scconf_get_bool(conf_block, "pkcs11_enable_InitToken", 0);
 
 	memset(&args, 0, sizeof(args));
 	args.so_pin = pPin;
@@ -1951,7 +1990,7 @@ pkcs15_init_pin(struct sc_pkcs11_slot *slot, CK_CHAR_PTR pPin, CK_ULONG ulPinLen
 	}
 
 	sc_log(context, "Init PIN: pin %p:%lu; unblock style %i", pPin,
-	       ulPinLen, sc_pkcs11_conf.pin_unblock_style);
+		ulPinLen, sc_pkcs11_conf.pin_unblock_style);
 
 	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[slot->fw_data_idx];
 	if (!fw_data)
@@ -2040,7 +2079,8 @@ pkcs15_create_private_key(struct sc_pkcs11_slot *slot, struct sc_profile *profil
 	CK_KEY_TYPE key_type;
 	struct sc_pkcs15_prkey_rsa *rsa = NULL;
 	struct sc_pkcs15_prkey_gostr3410 *gost = NULL;
-	int rc, rv;
+	int rc;
+	CK_RV rv;
 	char label[SC_PKCS15_MAX_LABEL_SIZE];
 
 	memset(&args, 0, sizeof(args));
@@ -2123,6 +2163,9 @@ pkcs15_create_private_key(struct sc_pkcs11_slot *slot, struct sc_profile *profil
 		case CKA_OPENSC_NON_REPUDIATION:
 			args.usage |= pkcs15_check_bool_cka(attr, SC_PKCS15_PRKEY_USAGE_NONREPUDIATION);
 			break;
+		case CKA_ALWAYS_AUTHENTICATE:
+			args.user_consent = (int) (pkcs15_check_bool_cka(attr, 1));
+			break;
 		default:
 			/* ignore unknown attrs, or flag error? */
 			continue;
@@ -2173,12 +2216,20 @@ out:	return rv;
 }
 
 
-/* TODO Only Session secret key objects are supported for now
- * Sesison objects have CKA_TOKEN=false
+/*
+ * Secret key objects can be stored on card, if the card supports them
+ *
+ * Session objects have CKA_TOKEN=false
+ *
+ * CKA_TOKEN = FALSE can mean two things:
+ *		1. If the card supports on card session objects, the object is stored on card for duration of the PKCS#11 session.
+ *		   Depending on card implementation, it can be automatically deleted during the card's reset.
+ *		   This kind of objects are not written to the PKCS#15 directory file.
+ *		2. If the card doesn't support on card session objects, a CKA_TOKEN = FALSE object is stored only in OpenSC's memory.
+ *
  * This is used by the C_DeriveKey with ECDH to hold the
- * key, and the calling application can then retrieve tha attributes as needed.
- * TODO If a card can support  secret key objects on the card, this
- * code will need to be expanded.
+ * key, and the calling application can then retrieve the attributes as needed.
+ * .
  */
 static CK_RV
 pkcs15_create_secret_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile,
@@ -2190,11 +2241,14 @@ pkcs15_create_secret_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile
 	struct sc_pkcs15init_skeyargs args;
 	struct pkcs15_any_object *key_any_obj = NULL;
 	struct sc_pkcs15_object	*key_obj = NULL;
+	struct sc_pkcs15_auth_info *pin = NULL;
 	struct sc_pkcs15_skey_info *skey_info;
 	CK_KEY_TYPE key_type;
 	CK_BBOOL _token = FALSE;
-	int rv;
+	CK_RV rv;
+	int rc;
 	char label[SC_PKCS15_MAX_LABEL_SIZE];
+	CK_BBOOL temp_object = FALSE;
 
 	memset(&args, 0, sizeof(args));
 	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[slot->fw_data_idx];
@@ -2211,9 +2265,22 @@ pkcs15_create_secret_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile
 	if (rv != CKR_OK)
 		return rv;
 
+	/* See if the "slot" is pin protected. If so, get the PIN id */
+	if ((pin = slot_data_auth_info(slot->fw_data)) != NULL)
+		args.auth_id = pin->auth_id;
+
 	switch (key_type) {
-		/* Only support GENERIC_SECRET for now */
 		case CKK_GENERIC_SECRET:
+			args.algorithm = SC_ALGORITHM_UNDEFINED;
+			break;
+		case CKK_AES:
+			args.algorithm = SC_ALGORITHM_AES;
+			break;
+		case CKK_DES3:
+			args.algorithm = SC_ALGORITHM_3DES;
+			break;
+		case CKK_DES:
+			args.algorithm = SC_ALGORITHM_DES;
 			break;
 		default:
 			return CKR_ATTRIBUTE_VALUE_INVALID;
@@ -2243,11 +2310,11 @@ pkcs15_create_secret_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile
 			break;
 		case CKA_VALUE:
 			if (attr->pValue) {
-			    args.key.data = calloc(1,attr->ulValueLen);
-			    if (!args.key.data)
+				args.key.data = calloc(1,attr->ulValueLen);
+				if (!args.key.data)
 				return CKR_HOST_MEMORY;
-			    memcpy(args.key.data, attr->pValue, attr->ulValueLen);
-			    args.key.data_len = attr->ulValueLen;
+				memcpy(args.key.data, attr->pValue, attr->ulValueLen);
+				args.key.data_len = attr->ulValueLen;
 			}
 			break;
 		case CKA_DECRYPT:
@@ -2262,6 +2329,13 @@ pkcs15_create_secret_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile
 		case CKA_UNWRAP:
 			args.usage |= pkcs15_check_bool_cka(attr, SC_PKCS15_PRKEY_USAGE_UNWRAP);
 			break;
+		case CKA_EXTRACTABLE:
+			if (pkcs15_check_bool_cka(attr, 1))
+				args.access_flags |= SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE;
+			break;
+		case CKA_OPENSC_ALWAYS_AUTH_ANY_OBJECT:
+			args.user_consent = (int) (pkcs15_check_bool_cka(attr, 1));
+			break;
 		default:
 			/* ignore unknown attrs, or flag error? */
 			continue;
@@ -2269,54 +2343,53 @@ pkcs15_create_secret_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile
 	}
 
 	/* If creating a PKCS#11 session object, i.e. one that is only in memory */
-	if (_token == FALSE) {
+	if (_token == FALSE && (fw_data->p15_card->card->caps & SC_CARD_CAP_ONCARD_SESSION_OBJECTS) == 0) {
 
-	    /* TODO Have 3 choices as to how to create the object.
-	     * (1)create a sc_pkcs15init_store_secret_key routine like the others
-	     * (2)use the sc_pkcs15emu_ routines
-	     * (3)do it inline here (Will do this for now)
-	     */
+		/* TODO Have 3 choices as to how to create the object.
+		 * (1)create a sc_pkcs15init_store_secret_key routine like the others
+		 * (2)use the sc_pkcs15emu_ routines
+		 * (3)do it inline here (Will do this for now)
+		 */
 
-	    key_obj = calloc(1, sizeof(sc_pkcs15_object_t));
-	    if (key_obj == NULL) {
+		key_obj = calloc(1, sizeof(sc_pkcs15_object_t));
+		if (key_obj == NULL) {
 			rv = CKR_HOST_MEMORY;
 			goto out;
-	    }
-	    key_obj->type = SC_PKCS15_TYPE_SKEY;
+		}
+		temp_object = TRUE;
+		key_obj->type = SC_PKCS15_TYPE_SKEY;
 
-	    if (args.id.len)
-		    memcpy(key_obj->label, args.id.value, args.id.len);
+		if (args.id.len)
+			memcpy(key_obj->label, args.id.value, args.id.len);
 
-	    key_obj->flags = 2; /* TODO not sure what these mean */
+		key_obj->flags = 2; /* TODO not sure what these mean */
 
 		skey_info = calloc(1, sizeof(sc_pkcs15_skey_info_t));
 		if (skey_info == NULL) {
 			rv = CKR_HOST_MEMORY;
 			goto out;
 		}
-	    key_obj->data = skey_info;
-	    skey_info->usage = args.usage;
-	    skey_info->native = 0; /* card can not use this */
-	    skey_info->access_flags = 0; /* looks like not needed */
-	    skey_info->key_type = key_type; /* PKCS#11 CKK_* */
-	    skey_info->data.value = args.key.data;
-	    skey_info->data.len = args.key.data_len;
-	    skey_info->value_len = args.value_len; /* callers preferred length */
-	    args.key.data = NULL;
+		key_obj->data = skey_info;
+		skey_info->usage = (unsigned int) args.usage;
+		skey_info->native = 0; /* card can not use this */
+		skey_info->access_flags = 0; /* looks like not needed */
+		skey_info->key_type = key_type; /* PKCS#11 CKK_* */
+		skey_info->data.value = args.key.data;
+		skey_info->data.len = args.key.data_len;
+		skey_info->value_len = args.value_len * 8; /* key length comes in number of bytes, use length in bits in PKCS#15. */
+		args.key.data = NULL;
+		key_obj->session_object = 1;
 	}
 	else {
-#if 1
-	    rv = CKR_FUNCTION_NOT_SUPPORTED;
-	    goto out;
-#else
-		/* TODO add support for secret key on the card with something like this: */
+		if(_token == FALSE)
+			args.session_object = 1;	/* store the object on card for duration of the session. */
 
-	    rc = sc_pkcs15init_store_secret_key(fw_data->p15_card, profile, &args, &key_obj);
-	    if (rc < 0) {
-		    rv = sc_to_cryptoki_error(rc, "C_CreateObject");
-		    goto out;
-	    }
-#endif
+		args.value_len = args.value_len * 8; /* CKA_VALUE_LEN is number of bytes, PKCS#15 needs key length in bits */
+		rc = sc_pkcs15init_store_secret_key(fw_data->p15_card, profile, &args, &key_obj);
+		if (rc < 0) {
+			rv = sc_to_cryptoki_error(rc, "C_CreateObject");
+			goto out;
+		}
 	}
 
 	/* Create a new pkcs11 object for it */
@@ -2327,7 +2400,8 @@ pkcs15_create_secret_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile
 
 out:
 	free(args.key.data); /* if allocated */
-	free(key_obj);
+	if (temp_object)
+		free(key_obj); /* do not free if the object was created by pkcs15init. It will be freed in C_Finalize */
 	return rv;
 }
 
@@ -2344,7 +2418,8 @@ pkcs15_create_public_key(struct sc_pkcs11_slot *slot, struct sc_profile *profile
 	struct sc_pkcs15_auth_info *pin = NULL;
 	CK_KEY_TYPE key_type;
 	struct sc_pkcs15_pubkey_rsa *rsa = NULL;
-	int rc, rv;
+	int rc;
+	CK_RV rv;
 	char label[SC_PKCS15_MAX_LABEL_SIZE];
 
 	memset(&args, 0, sizeof(args));
@@ -2449,7 +2524,8 @@ pkcs15_create_certificate(struct sc_pkcs11_slot *slot,
 	struct sc_pkcs15_object	*cert_obj = NULL;
 	CK_CERTIFICATE_TYPE	cert_type;
 	CK_BBOOL		bValue;
-	int			rc, rv;
+	int			rc;
+	CK_RV rv;
 	char label[SC_PKCS15_MAX_LABEL_SIZE];
 
 	memset(&args, 0, sizeof(args));
@@ -2530,7 +2606,8 @@ pkcs15_create_data(struct sc_pkcs11_slot *slot, struct sc_profile *profile,
 	struct sc_pkcs15_object	*data_obj = NULL;
 	struct sc_pkcs15_auth_info *pin = NULL;
 	CK_BBOOL bValue;
-	int rc, rv;
+	int rc;
+	CK_RV rv;
 	char label[SC_PKCS15_MAX_LABEL_SIZE];
 
 	memset(&args, 0, sizeof(args));
@@ -2571,7 +2648,7 @@ pkcs15_create_data(struct sc_pkcs11_slot *slot, struct sc_profile *profile,
 			args.app_label = (char *) attr->pValue;
 			break;
 		case CKA_OBJECT_ID:
-			if (sc_asn1_decode_object_id(attr->pValue, attr->ulValueLen, &args.app_oid))   {
+			if (sc_asn1_decode_object_id(attr->pValue, attr->ulValueLen, &args.app_oid)) {
 				rv = CKR_ATTRIBUTE_VALUE_INVALID;
 				goto out;
 			}
@@ -2584,11 +2661,6 @@ pkcs15_create_data(struct sc_pkcs11_slot *slot, struct sc_profile *profile,
 			/* ignore unknown attrs, or flag error? */
 			continue;
 		}
-	}
-
-	if (args.der_encoded.len == 0) {
-		rv = CKR_TEMPLATE_INCOMPLETE;
-		goto out;
 	}
 
 	rc = sc_pkcs15init_store_data_object(fw_data->p15_card, profile, &args, &data_obj);
@@ -2615,7 +2687,9 @@ pkcs15_create_object(struct sc_pkcs11_slot *slot, CK_ATTRIBUTE_PTR pTemplate, CK
 	struct sc_profile *profile = NULL;
 	CK_OBJECT_CLASS	_class;
 	CK_BBOOL _token = FALSE;
-	int rv, rc;
+	CK_RV rv;
+	int rc;
+	CK_BBOOL p15init_create_object;
 
 	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[slot->fw_data_idx];
 	if (!fw_data)
@@ -2633,7 +2707,7 @@ pkcs15_create_object(struct sc_pkcs11_slot *slot, CK_ATTRIBUTE_PTR pTemplate, CK
 		if (_class != CKO_SECRET_KEY)
 			_token = TRUE; /* default if not in template */
 	}
-	else if (rv != CKR_OK)   {
+	else if (rv != CKR_OK) {
 		return rv;
 	}
 
@@ -2642,8 +2716,11 @@ pkcs15_create_object(struct sc_pkcs11_slot *slot, CK_ATTRIBUTE_PTR pTemplate, CK
 	 * PKCS#11 says the default is false.
 	 * for backward compatibility, will default to TRUE
 	 */
-	 /* Dont need profile id creating session only objects */
-	if (_token == TRUE) {
+	 /* Dont need profile id creating session only objects,
+		except when the card supports temporary on card session objects */
+	p15init_create_object = _token == TRUE || (p11card->card->caps & SC_CARD_CAP_ONCARD_SESSION_OBJECTS) == SC_CARD_CAP_ONCARD_SESSION_OBJECTS;
+
+	if (p15init_create_object) {
 		struct sc_aid *aid = NULL;
 
 		rc = sc_lock(p11card->card);
@@ -2689,7 +2766,9 @@ pkcs15_create_object(struct sc_pkcs11_slot *slot, CK_ATTRIBUTE_PTR pTemplate, CK
 		rv = CKR_FUNCTION_NOT_SUPPORTED;
 	}
 
-	if (_token == TRUE) {
+	if (p15init_create_object) {
+		// TODO: after sc_pkcs15init_unbind, user may have to enter PIN on a pin pad reader even though authentication state
+		// is supposed to remain open. Check why this happens.
 		sc_pkcs15init_unbind(profile);
 		sc_unlock(p11card->card);
 	}
@@ -2719,8 +2798,8 @@ get_X509_usage_privk(CK_ATTRIBUTE_PTR pTempl, CK_ULONG ulCount, unsigned long *x
 			*x509_usage |= SC_PKCS15INIT_X509_NON_REPUDIATION;
 		if (typ == CKA_VERIFY || typ == CKA_WRAP || typ == CKA_ENCRYPT) {
 			sc_log(context,
-			       "get_X509_usage_privk(): invalid typ = 0x%0lx",
-			       typ);
+				"get_X509_usage_privk(): invalid typ = 0x%0lx",
+				typ);
 			return CKR_ATTRIBUTE_TYPE_INVALID;
 		}
 	}
@@ -2747,8 +2826,8 @@ get_X509_usage_pubk(CK_ATTRIBUTE_PTR pTempl, CK_ULONG ulCount, unsigned long *x5
 			*x509_usage |= SC_PKCS15INIT_X509_KEY_AGREEMENT;
 		if (typ == CKA_SIGN || typ == CKA_UNWRAP || typ == CKA_DECRYPT) {
 			sc_log(context,
-			       "get_X509_usage_pubk(): invalid typ = 0x%0lx",
-			       typ);
+				"get_X509_usage_pubk(): invalid typ = 0x%0lx",
+				typ);
 			return CKR_ATTRIBUTE_TYPE_INVALID;
 		}
 	}
@@ -2866,10 +2945,12 @@ pkcs15_gen_keypair(struct sc_pkcs11_slot *slot, CK_MECHANISM_PTR pMechanism,
 	CK_ULONG	keybits = 0;
 	char		pub_label[SC_PKCS15_MAX_LABEL_SIZE];
 	char		priv_label[SC_PKCS15_MAX_LABEL_SIZE];
-	int		rc, rv = CKR_OK;
+	int		rc;
+	CK_RV rv = CKR_OK;
+	CK_BBOOL always_auth = CK_FALSE;
 
 	sc_log(context, "Keypair generation, mech = 0x%0lx",
-	       pMechanism->mechanism);
+		   pMechanism->mechanism);
 
 	if (pMechanism->mechanism != CKM_RSA_PKCS_KEY_PAIR_GEN
 			&& pMechanism->mechanism != CKM_GOSTR3410_KEY_PAIR_GEN
@@ -2982,12 +3063,18 @@ pkcs15_gen_keypair(struct sc_pkcs11_slot *slot, CK_MECHANISM_PTR pMechanism,
 		goto kpgen_done;
 	pub_args.x509_usage = keygen_args.prkey_args.x509_usage;
 
+	len = sizeof(always_auth);
+	rv = attr_find(pPrivTpl, ulPrivCnt, CKA_ALWAYS_AUTHENTICATE, &always_auth, &len);
+	if (rv == CKR_OK && always_auth == CK_TRUE) {
+		keygen_args.prkey_args.user_consent = 1;
+	}
+
 	/* 3.a Try on-card key pair generation */
 
 	sc_pkcs15init_set_p15card(profile, fw_data->p15_card);
 
 	sc_log(context, "Try on-card key pair generation");
-	rc = sc_pkcs15init_generate_key(fw_data->p15_card, profile, &keygen_args, keybits, &priv_key_obj);
+	rc = sc_pkcs15init_generate_key(fw_data->p15_card, profile, &keygen_args, (unsigned int) keybits, &priv_key_obj);
 	if (rc >= 0) {
 		id = ((struct sc_pkcs15_prkey_info *) priv_key_obj->data)->id;
 		rc = sc_pkcs15_find_pubkey_by_id(fw_data->p15_card, &id, &pub_key_obj);
@@ -3076,7 +3163,7 @@ pkcs15_any_destroy(struct sc_pkcs11_session *session, void *object)
 	struct pkcs15_any_object *any_obj = (struct pkcs15_any_object*) object;
 	struct sc_pkcs11_slot *slot = session->slot;
 	struct sc_pkcs11_card *p11card = slot->p11card;
-        struct pkcs15_fw_data *fw_data = NULL;
+	struct pkcs15_fw_data *fw_data = NULL;
 	struct sc_aid *aid = NULL;
 	struct sc_profile *profile = NULL;
 	int rv;
@@ -3236,7 +3323,7 @@ pkcs15_set_attrib(struct sc_pkcs11_session *session, struct sc_pkcs15_object *p1
 	switch(attr->type) {
 	case CKA_LABEL:
 		rv = sc_pkcs15init_change_attrib(fw_data->p15_card, profile, p15_object,
-				P15_ATTR_TYPE_LABEL, attr->pValue, attr->ulValueLen);
+				P15_ATTR_TYPE_LABEL, attr->pValue, (unsigned int) attr->ulValueLen);
 		break;
 	case CKA_ID:
 		if (attr->ulValueLen > SC_PKCS15_MAX_ID_SIZE) {
@@ -3250,6 +3337,14 @@ pkcs15_set_attrib(struct sc_pkcs11_session *session, struct sc_pkcs15_object *p1
 		break;
 	case CKA_SUBJECT:
 		rv = SC_SUCCESS;
+		break;
+	case CKA_VALUE:
+		if ((p15_object->type & SC_PKCS15_TYPE_CLASS_MASK) != SC_PKCS15_TYPE_DATA_OBJECT) {
+			ck_rv = CKR_ATTRIBUTE_READ_ONLY;
+			goto set_attr_done;
+		}
+		rv = sc_pkcs15init_change_attrib(fw_data->p15_card, profile, p15_object, 
+				P15_ATTR_TYPE_VALUE, attr->pValue, (unsigned int) attr->ulValueLen);
 		break;
 	default:
 		ck_rv = CKR_ATTRIBUTE_READ_ONLY;
@@ -3334,14 +3429,15 @@ pkcs15_cert_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 		*(CK_CERTIFICATE_TYPE*)attr->pValue = CKC_X_509;
 		break;
 	case CKA_ID:
-		if (cert->cert_info->authority && sc_pkcs11_conf.zero_ckaid_for_ca_certs) {
+#ifdef ZERO_CKAID_FOR_CA_CERTS
+		if (cert->cert_info->authority) {
 			check_attribute_buffer(attr, 1);
 			*(unsigned char*)attr->pValue = 0;
+			break;
 		}
-		else {
-			check_attribute_buffer(attr, cert->cert_info->id.len);
-			memcpy(attr->pValue, cert->cert_info->id.value, cert->cert_info->id.len);
-		}
+#endif
+		check_attribute_buffer(attr, cert->cert_info->id.len);
+		memcpy(attr->pValue, cert->cert_info->id.value, cert->cert_info->id.len);
 		break;
 	case CKA_TRUSTED:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
@@ -3389,7 +3485,7 @@ pkcs15_cert_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 
 #define ASN1_SET_TAG (SC_ASN1_SET | SC_ASN1_TAG_CONSTRUCTED)
 #define ASN1_SEQ_TAG (SC_ASN1_SEQUENCE | SC_ASN1_TAG_CONSTRUCTED)
-static int
+static CK_RV
 pkcs15_cert_cmp_attribute(struct sc_pkcs11_session *session,
 		void *object, CK_ATTRIBUTE_PTR attr)
 {
@@ -3460,7 +3556,9 @@ struct sc_pkcs11_object_ops pkcs15_cert_ops = {
 	NULL,	/* unwrap_key */
 	NULL,	/* decrypt */
 	NULL,	/* derive */
-	NULL	/* can_do */
+	NULL,	/* can_do */
+	NULL,	/* init_params */
+	NULL	/* wrap_key */
 };
 
 /*
@@ -3582,7 +3680,7 @@ pkcs15_prkey_get_attribute(struct sc_pkcs11_session *session,
 		break;
     case CKA_ALWAYS_AUTHENTICATE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		*(CK_BBOOL*)attr->pValue = prkey->prv_p15obj->user_consent;
+		*(CK_BBOOL*)attr->pValue = prkey->prv_p15obj->user_consent >= 1 ? CK_TRUE : CK_FALSE;
 		break;
 	case CKA_PRIVATE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
@@ -3680,6 +3778,49 @@ pkcs15_prkey_get_attribute(struct sc_pkcs11_session *session,
 }
 
 
+
+static CK_RV
+pkcs15_prkey_check_pss_param(CK_MECHANISM_PTR pMechanism, CK_ULONG hlen)
+{
+	CK_RSA_PKCS_PSS_PARAMS *pss_param;
+	int i;
+	const unsigned int hash_lens[5] = { 160, 256, 385, 512, 224 };
+	const unsigned int hashes[5] = { CKM_SHA_1, CKM_SHA256,
+		CKM_SHA384, CKM_SHA512, CKM_SHA224 };
+
+	pss_param = (CK_RSA_PKCS_PSS_PARAMS *)pMechanism->pParameter;
+
+	// Hash parameter must match length of data supplied for CKM_RSA_PKCS_PSS
+	for (i = 0; i < 5; i++) {
+		if (pss_param->hashAlg == hashes[i]
+			&& hlen != hash_lens[i]/8)
+			return CKR_MECHANISM_PARAM_INVALID;
+	}
+	/* other aspects of pss params were already verified during SignInit */
+
+	return CKR_OK;
+}
+
+static int mgf2flags(CK_RSA_PKCS_MGF_TYPE mgf)
+{
+	switch (mgf) {
+	case CKG_MGF1_SHA224:
+		return SC_ALGORITHM_MGF1_SHA224;
+		break;
+	case CKG_MGF1_SHA256:
+		return SC_ALGORITHM_MGF1_SHA256;
+	case CKG_MGF1_SHA384:
+		return SC_ALGORITHM_MGF1_SHA384;
+	case CKG_MGF1_SHA512:
+		return SC_ALGORITHM_MGF1_SHA512;
+	case CKG_MGF1_SHA1:
+		return SC_ALGORITHM_MGF1_SHA1;
+	default:
+		return -1;
+	}
+}
+
+
 static CK_RV
 pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 			CK_MECHANISM_PTR pMechanism, CK_BYTE_PTR pData,
@@ -3689,12 +3830,13 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 	struct pkcs15_prkey_object *prkey = (struct pkcs15_prkey_object *) obj;
 	struct sc_pkcs11_card *p11card = session->slot->p11card;
 	struct pkcs15_fw_data *fw_data = NULL;
-	int rv, flags = 0, prkey_has_path = 0;
+	CK_RV rv;
+	int flags = 0, prkey_has_path = 0, rc;
 	unsigned sign_flags = SC_PKCS15_PRKEY_USAGE_SIGN | SC_PKCS15_PRKEY_USAGE_SIGNRECOVER
 			| SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
 
 	sc_log(context, "Initiating signing operation, mechanism 0x%lx.",
-	       pMechanism->mechanism);
+		   pMechanism->mechanism);
 	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[session->slot->fw_data_idx];
 	if (!fw_data)
 		return sc_to_cryptoki_error(SC_ERROR_INTERNAL, "C_Sign");
@@ -3719,6 +3861,9 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 	case CKM_SHA1_RSA_PKCS:
 		flags = SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_SHA1;
 		break;
+	case CKM_SHA224_RSA_PKCS:
+		flags = SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_SHA224;
+		break;
 	case CKM_SHA256_RSA_PKCS:
 		flags = SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_SHA256;
 		break;
@@ -3733,6 +3878,69 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 		break;
 	case CKM_RSA_X_509:
 		flags = SC_ALGORITHM_RSA_RAW;
+		break;
+	case CKM_RSA_PKCS_PSS:
+		flags = SC_ALGORITHM_RSA_PAD_PSS;
+		/* The hash was done ouside of the module */
+		flags |= SC_ALGORITHM_RSA_HASH_NONE;
+		/* Omited parameter can use MGF1-SHA1 ? */
+		if (pMechanism->pParameter == NULL) {
+			flags |= SC_ALGORITHM_MGF1_SHA1;
+			if (ulDataLen != SHA_DIGEST_LENGTH)
+				return CKR_MECHANISM_PARAM_INVALID;
+			break;
+		}
+
+		/* Check the data length matches the selected hash */
+		rv = pkcs15_prkey_check_pss_param(pMechanism, (int)ulDataLen);
+		if (rv != CKR_OK) {
+			sc_log(context, "Invalid data lenght for the selected "
+			    "PSS parameters");
+			return rv;
+		}
+
+		/* The MGF parameter was already verified in SignInit() */
+		flags |=  mgf2flags(((CK_RSA_PKCS_PSS_PARAMS*)pMechanism->pParameter)->mgf);
+
+		/* Assuming salt is the size of hash */
+		break;
+	case CKM_SHA1_RSA_PKCS_PSS:
+	case CKM_SHA224_RSA_PKCS_PSS:
+	case CKM_SHA256_RSA_PKCS_PSS:
+	case CKM_SHA384_RSA_PKCS_PSS:
+	case CKM_SHA512_RSA_PKCS_PSS:
+		flags = SC_ALGORITHM_RSA_PAD_PSS;
+		/* Omited parameter can use MGF1-SHA1 and SHA1 hash ? */
+		if (pMechanism->pParameter == NULL) {
+			flags |= SC_ALGORITHM_RSA_HASH_SHA1;
+			flags |= SC_ALGORITHM_MGF1_SHA1;
+			break;
+		}
+
+		switch (((CK_RSA_PKCS_PSS_PARAMS*)pMechanism->pParameter)->hashAlg) {
+		case CKM_SHA_1:
+			flags |= SC_ALGORITHM_RSA_HASH_SHA1;
+			break;
+		case CKM_SHA224:
+			flags |= SC_ALGORITHM_RSA_HASH_SHA224;
+			break;
+		case CKM_SHA256:
+			flags |= SC_ALGORITHM_RSA_HASH_SHA256;
+			break;
+		case CKM_SHA384:
+			flags |= SC_ALGORITHM_RSA_HASH_SHA384;
+			break;
+		case CKM_SHA512:
+			flags |= SC_ALGORITHM_RSA_HASH_SHA512;
+			break;
+		default:
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+
+		/* The MGF parameter was already verified in SignInit() */
+		flags |= mgf2flags(((CK_RSA_PKCS_PSS_PARAMS*)pMechanism->pParameter)->mgf);
+
+		/* Assuming salt is the size of hash */
 		break;
 	case CKM_GOSTR3410:
 		flags = SC_ALGORITHM_GOSTR3410_HASH_NONE;
@@ -3751,16 +3959,16 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 		return CKR_MECHANISM_INVALID;
 	}
 
-	rv = sc_lock(p11card->card);
-	if (rv < 0)
-		return sc_to_cryptoki_error(rv, "C_Sign");
+	rc = sc_lock(p11card->card);
+	if (rc < 0)
+		return sc_to_cryptoki_error(rc, "C_Sign");
 
 	sc_log(context,
 	       "Selected flags %X. Now computing signature for %lu bytes. %lu bytes reserved.",
 	       flags, ulDataLen, *pulDataLen);
-	rv = sc_pkcs15_compute_signature(fw_data->p15_card, prkey->prv_p15obj, flags,
+	rc = sc_pkcs15_compute_signature(fw_data->p15_card, prkey->prv_p15obj, flags,
 			pData, ulDataLen, pSignature, *pulDataLen);
-	if (rv < 0 && !sc_pkcs11_conf.lock_login && !prkey_has_path) {
+	if (rc < 0 && !sc_pkcs11_conf.lock_login && !prkey_has_path) {
 		/* If private key PKCS#15 object do not have 'path' attribute,
 		 * and if PKCS#11 login session is not locked,
 		 * the compute signature could fail because of concurrent access to the card
@@ -3768,22 +3976,83 @@ pkcs15_prkey_sign(struct sc_pkcs11_session *session, void *obj,
 		 * In this particular case try to 'reselect' application DF.
 		 */
 		if (reselect_app_df(fw_data->p15_card) == SC_SUCCESS)
-			rv = sc_pkcs15_compute_signature(fw_data->p15_card, prkey->prv_p15obj, flags,
+			rc = sc_pkcs15_compute_signature(fw_data->p15_card, prkey->prv_p15obj, flags,
 					pData, ulDataLen, pSignature, *pulDataLen);
 	}
 
 	sc_unlock(p11card->card);
 
-	sc_log(context, "Sign complete. Result %d.", rv);
+	sc_log(context, "Sign complete. Result %d.", rc);
 
-	if (rv > 0) {
-		*pulDataLen = rv;
+	if (rc > 0) {
+		*pulDataLen = rc;
 		return CKR_OK;
 	}
 
-	return sc_to_cryptoki_error(rv, "C_Sign");
+	return sc_to_cryptoki_error(rc, "C_Sign");
 }
 
+
+static CK_RV
+pkcs15_prkey_unwrap(struct sc_pkcs11_session *session, void *obj,
+			CK_MECHANISM_PTR pMechanism, CK_BYTE_PTR pWrappedKey,
+			CK_ULONG ulWrappedKeyLen,
+			void *targetKey)
+{
+	struct	sc_pkcs11_card *p11card = session->slot->p11card;
+	struct	pkcs15_fw_data *fw_data = NULL;
+	struct	pkcs15_prkey_object *prkey = (struct pkcs15_prkey_object *) obj;
+	struct	pkcs15_any_object *targetKeyObj = (struct pkcs15_any_object *) targetKey;
+	int	rv, flags = 0;	
+
+	sc_log(context, "Initiating unwrapping with private key.");
+
+	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[session->slot->fw_data_idx];
+	if (!fw_data)
+		return sc_to_cryptoki_error(SC_ERROR_INTERNAL, "C_UnwrapKey");
+
+	if (pMechanism == NULL || pWrappedKey == NULL || ulWrappedKeyLen == 0 || targetKeyObj == NULL) {
+		sc_log(context, "One or more of mandatory arguments were NULL.");
+	    return CKR_ARGUMENTS_BAD;
+	}
+
+	/* See which of the alternative keys supports unwrap */
+	while (prkey && !(prkey->prv_info->usage & SC_PKCS15_PRKEY_USAGE_UNWRAP))
+		prkey = prkey->prv_next;
+
+	if (prkey == NULL)
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	sc_log(context, "Using mechanism %lx.", pMechanism->mechanism);
+
+	/* Select the proper padding mechanism */
+	switch (pMechanism->mechanism) {
+	case CKM_RSA_PKCS:
+		flags |= SC_ALGORITHM_RSA_PAD_PKCS1;
+		break;
+	case CKM_RSA_X_509:
+		flags |= SC_ALGORITHM_RSA_RAW;
+		break;
+	default:
+		return CKR_MECHANISM_INVALID;
+	}
+
+	rv = sc_lock(p11card->card);
+
+	if (rv < 0)
+		return sc_to_cryptoki_error(rv, "C_UnwrapKey");
+
+	/* Call the card to do the unwrap operation */
+	rv = sc_pkcs15_unwrap(fw_data->p15_card, prkey->prv_p15obj, targetKeyObj->p15_object, 0,
+		pWrappedKey, ulWrappedKeyLen, NULL, 0);
+
+	sc_unlock(p11card->card);
+
+	if (rv < 0)
+		return sc_to_cryptoki_error(rv, "C_UnwrapKey");
+
+	return CKR_OK;
+}
 
 static CK_RV
 pkcs15_prkey_decrypt(struct sc_pkcs11_session *session, void *obj,
@@ -3876,9 +4145,6 @@ pkcs15_prkey_derive(struct sc_pkcs11_session *session, void *obj,
 	if (!fw_data)
 		return sc_to_cryptoki_error(SC_ERROR_INTERNAL, "C_DeriveKey");
 
-	sc_log(context, "derivation %p %p %p %p %lu %p %lu", session, obj,
-	       pMechanism, pParameters, ulParametersLen, pData, *pulDataLen);
-
 	/* See which of the alternative keys supports derivation */
 	while (prkey && !(prkey->prv_info->usage & SC_PKCS15_PRKEY_USAGE_DERIVE))
 		prkey = prkey->prv_next;
@@ -3890,10 +4156,10 @@ pkcs15_prkey_derive(struct sc_pkcs11_session *session, void *obj,
 		prkey_has_path = 1;
 
 	if (pData != NULL && *pulDataLen > 0) { /* TODO DEE only test for NULL? */
-	    need_unlock = 1;
-	    rv = sc_lock(p11card->card);
-	    if (rv < 0)
-		    return sc_to_cryptoki_error(rv, "C_DeriveKey");
+		need_unlock = 1;
+		rv = sc_lock(p11card->card);
+		if (rv < 0)
+			return sc_to_cryptoki_error(rv, "C_DeriveKey");
 	}
 
 	/* TODO DEE This may not be the place to get the parameters,
@@ -3901,11 +4167,11 @@ pkcs15_prkey_derive(struct sc_pkcs11_session *session, void *obj,
 	 * RSA parameters would be null.
 	 */
 	switch (prkey->base.p15_object->type) {
-	    case SC_PKCS15_TYPE_PRKEY_EC:
+		case SC_PKCS15_TYPE_PRKEY_EC:
 		{
-		    CK_ECDH1_DERIVE_PARAMS * ecdh_params = (CK_ECDH1_DERIVE_PARAMS *) pParameters;
-		    ulSeedDataLen = ecdh_params->ulPublicDataLen;
-		    pSeedData = ecdh_params->pPublicData;
+			CK_ECDH1_DERIVE_PARAMS * ecdh_params = (CK_ECDH1_DERIVE_PARAMS *) pParameters;
+			ulSeedDataLen = ecdh_params->ulPublicDataLen;
+			pSeedData = ecdh_params->pPublicData;
 		}
 		break;
 	}
@@ -3980,6 +4246,76 @@ pkcs15_prkey_can_do(struct sc_pkcs11_session *session, void *obj,
 }
 
 
+static CK_RV
+pkcs15_prkey_init_params(struct sc_pkcs11_session *session,
+			CK_MECHANISM_PTR pMechanism)
+{
+	const CK_RSA_PKCS_PSS_PARAMS *pss_params;
+	unsigned int expected_hash = 0, i;
+	unsigned int expected_salt_len = 0;
+	const unsigned int salt_lens[5] = { 160, 256, 384, 512, 224 };
+	const unsigned int hashes[5] = { CKM_SHA_1, CKM_SHA256,
+		CKM_SHA384, CKM_SHA512, CKM_SHA224 };
+
+	switch (pMechanism->mechanism) {
+	case CKM_RSA_PKCS_PSS:
+	case CKM_SHA1_RSA_PKCS_PSS:
+	case CKM_SHA224_RSA_PKCS_PSS:
+	case CKM_SHA256_RSA_PKCS_PSS:
+	case CKM_SHA384_RSA_PKCS_PSS:
+	case CKM_SHA512_RSA_PKCS_PSS:
+		if (!pMechanism->pParameter ||
+			pMechanism->ulParameterLen != sizeof(CK_RSA_PKCS_PSS_PARAMS))
+			return CKR_MECHANISM_PARAM_INVALID;
+
+		pss_params = (CK_RSA_PKCS_PSS_PARAMS*)pMechanism->pParameter;
+		if (pss_params->mgf < CKG_MGF1_SHA1 || pss_params->mgf > CKG_MGF1_SHA224)
+			return CKR_MECHANISM_PARAM_INVALID;
+
+		/* The hashAlg field can have any value for CKM_RSA_PKCS_PSS and must be
+		 * used again in the PSS padding; for the other mechanisms it strictly
+		 * must match the padding declared in the mechanism.
+		 */
+		if (pMechanism->mechanism == CKM_SHA1_RSA_PKCS_PSS) {
+			expected_hash = CKM_SHA_1;
+			expected_salt_len = 160;
+		} else if (pMechanism->mechanism == CKM_SHA224_RSA_PKCS_PSS) {
+			expected_hash = CKM_SHA224;
+			expected_salt_len = 224;
+		} else if (pMechanism->mechanism == CKM_SHA256_RSA_PKCS_PSS) {
+			expected_hash = CKM_SHA256;
+			expected_salt_len = 256;
+		} else if (pMechanism->mechanism == CKM_SHA384_RSA_PKCS_PSS) {
+			expected_hash = CKM_SHA384;
+			expected_salt_len = 384;
+		} else if (pMechanism->mechanism == CKM_SHA512_RSA_PKCS_PSS) {
+			expected_hash = CKM_SHA512;
+			expected_salt_len = 512;
+		} else if (pMechanism->mechanism == CKM_RSA_PKCS_PSS) {
+			for (i = 0; i < 5; ++i) {
+				if (hashes[i] == pss_params->hashAlg) {
+					expected_hash = hashes[i];
+					expected_salt_len = salt_lens[i];
+				}
+			}
+		}
+
+		if (expected_hash != pss_params->hashAlg)
+			return CKR_MECHANISM_PARAM_INVALID;
+
+		/* We're strict, and only do PSS signatures with a salt length that
+		 * matches the digest length (any shorter is rubbish, any longer
+		 * is useless). */
+		if (pss_params->sLen != expected_salt_len / 8)
+			return CKR_MECHANISM_PARAM_INVALID;
+
+		/* TODO support different salt lengths */
+		break;
+	}
+	return CKR_OK;
+}
+
+
 struct sc_pkcs11_object_ops pkcs15_prkey_ops = {
 	pkcs15_prkey_release,
 	pkcs15_prkey_set_attribute,
@@ -3988,10 +4324,12 @@ struct sc_pkcs11_object_ops pkcs15_prkey_ops = {
 	pkcs15_any_destroy,
 	NULL,	/* get_size */
 	pkcs15_prkey_sign,
-	NULL,	/* unwrap */
+	pkcs15_prkey_unwrap,
 	pkcs15_prkey_decrypt,
-        pkcs15_prkey_derive,
-        pkcs15_prkey_can_do
+	pkcs15_prkey_derive,
+	pkcs15_prkey_can_do,
+	pkcs15_prkey_init_params,
+	NULL	/* wrap_key */
 };
 
 /*
@@ -4067,9 +4405,9 @@ pkcs15_pubkey_get_attribute(struct sc_pkcs11_session *session, void *object, CK_
 	case CKA_LOCAL:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
 		if (pubkey->pub_info)
-		    *(CK_BBOOL*)attr->pValue = (pubkey->pub_info->access_flags & SC_PKCS15_PRKEY_ACCESS_LOCAL) != 0;
+			*(CK_BBOOL*)attr->pValue = (pubkey->pub_info->access_flags & SC_PKCS15_PRKEY_ACCESS_LOCAL) != 0;
 		else /* no pub_info structure, falling back to TRUE */
-		    *(CK_BBOOL*)attr->pValue = TRUE;
+			*(CK_BBOOL*)attr->pValue = TRUE;
 		break;
 	case CKA_PRIVATE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
@@ -4228,7 +4566,9 @@ struct sc_pkcs11_object_ops pkcs15_pubkey_ops = {
 	NULL,	/* unwrap_key */
 	NULL,	/* decrypt */
 	NULL,	/* derive */
-	NULL	/* can_do */
+	NULL,	/* can_do */
+	NULL,	/* init_params */
+	NULL	/* wrap_key */
 };
 
 
@@ -4250,7 +4590,7 @@ pkcs15_dobj_set_attribute(struct sc_pkcs11_session *session,
 }
 
 
-static int
+static CK_RV
 pkcs15_dobj_get_value(struct sc_pkcs11_session *session,
 		struct pkcs15_data_object *dobj,
 		struct sc_pkcs15_data **out_data)
@@ -4262,6 +4602,13 @@ pkcs15_dobj_get_value(struct sc_pkcs11_session *session,
 
 	if (!out_data)
 		return SC_ERROR_INVALID_ARGUMENTS;
+	if (dobj->info->data.len == 0)
+	/* CKA_VALUE is empty */
+	{
+		*out_data = NULL;
+		return sc_to_cryptoki_error(SC_SUCCESS, "C_GetAttributeValue");
+	}
+
 	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[session->slot->fw_data_idx];
 	if (!fw_data)
 		return sc_to_cryptoki_error(SC_ERROR_INTERNAL, "C_GetAttributeValue");
@@ -4285,10 +4632,6 @@ data_value_to_attr(CK_ATTRIBUTE_PTR attr, struct sc_pkcs15_data *data)
 {
 	if (!attr || !data)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
-
-	sc_log(context,
-	       "data_value_to_attr(): data(%p,len:%"SC_FORMAT_LEN_SIZE_T"u)",
-	       data, data->data_len);
 
 	check_attribute_buffer(attr, data->data_len);
 	memcpy(attr->pValue, data->data, data->data_len);
@@ -4363,9 +4706,17 @@ pkcs15_dobj_get_attribute(struct sc_pkcs11_session *session, void *object, CK_AT
 		free(buf);
 		break;
 	case CKA_VALUE:
+		/* if CKA_VALUE is empty, sets data to NULL */
 		rv = pkcs15_dobj_get_value(session, dobj, &data);
-		if (rv == CKR_OK)
-			rv = data_value_to_attr(attr, data);
+		if (rv == CKR_OK) {
+			if (data) {
+				rv = data_value_to_attr(attr, data);
+			}
+			else {
+				attr->ulValueLen = 0;
+				attr->pValue = NULL_PTR;
+			}
+		}
 		if (data) {
 			free(data->data);
 			free(data);
@@ -4391,7 +4742,9 @@ struct sc_pkcs11_object_ops pkcs15_dobj_ops = {
 	NULL,	/* unwrap_key */
 	NULL,	/* decrypt */
 	NULL,	/* derive */
-	NULL	/* can_do */
+	NULL,	/* can_do */
+	NULL,	/* init_params */
+	NULL	/* wrap_key */
 };
 
 
@@ -4446,17 +4799,16 @@ pkcs15_skey_get_attribute(struct sc_pkcs11_session *session,
 		*(CK_OBJECT_CLASS*)attr->pValue = CKO_SECRET_KEY;
 		break;
 	case CKA_TOKEN:
-		/*TODO DEE change if on card skeys are supported */
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		*(CK_BBOOL*)attr->pValue = FALSE;
+		*(CK_BBOOL*)attr->pValue = skey->base.p15_object->session_object == 0 ? CK_TRUE : CK_FALSE;
 		break;
 	case CKA_PRIVATE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		*(CK_BBOOL*)attr->pValue = (skey->base.p15_object->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0;
+		*(CK_BBOOL*)attr->pValue = (skey->base.p15_object->flags & SC_PKCS15_CO_FLAG_PRIVATE) != 0 ? CK_TRUE : CK_FALSE;
 		break;
 	case CKA_MODIFIABLE:
 		check_attribute_buffer(attr, sizeof(CK_BBOOL));
-		*(CK_BBOOL*)attr->pValue = (skey->base.p15_object->flags & 0x02) != 0;
+		*(CK_BBOOL*)attr->pValue = (skey->base.p15_object->flags & 0x02) != 0 ? CK_TRUE : CK_FALSE;
 		/*TODO Why no definition of the flag */
 		break;
 	case CKA_LABEL:
@@ -4490,6 +4842,16 @@ pkcs15_skey_get_attribute(struct sc_pkcs11_session *session,
 		check_attribute_buffer(attr, skey->info->id.len);
 		memcpy(attr->pValue, skey->info->id.value, skey->info->id.len);
 		break;
+	case CKA_EXTRACTABLE:
+		check_attribute_buffer(attr, sizeof(CK_BBOOL));
+		*(CK_BBOOL*)attr->pValue = (((skey->base.p15_object->flags & SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE) == SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE)
+					&& (skey->base.p15_object->flags & SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE) == 0
+					&& (skey->base.p15_object->flags & SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE) == 0) ? CK_TRUE : CK_FALSE;
+		break;
+	case CKA_OPENSC_ALWAYS_AUTH_ANY_OBJECT:
+		check_attribute_buffer(attr, sizeof(CK_BBOOL));
+		*(CK_BBOOL*)attr->pValue = skey->base.p15_object->user_consent >= 1 ? CK_TRUE : CK_FALSE;
+		break;
 	case CKA_VALUE_LEN:
 		check_attribute_buffer(attr, sizeof(CK_ULONG));
 		*(CK_ULONG*)attr->pValue = skey->info->data.len;
@@ -4501,6 +4863,145 @@ pkcs15_skey_get_attribute(struct sc_pkcs11_session *session,
 	default:
 		return CKR_ATTRIBUTE_TYPE_INVALID;
 	}
+
+	return CKR_OK;
+}
+
+static CK_RV
+pkcs15_skey_unwrap(struct sc_pkcs11_session *session, void *obj,
+			CK_MECHANISM_PTR pMechanism, CK_BYTE_PTR pWrappedKey,
+			CK_ULONG ulWrappedKeyLen,
+			void *targetKey)
+{
+	struct	sc_pkcs11_card *p11card = session->slot->p11card;
+	struct	pkcs15_fw_data *fw_data = NULL;
+	struct	pkcs15_skey_object *skey = (struct pkcs15_skey_object *) obj;
+	struct	pkcs15_skey_object *targetKeyObj = (struct pkcs15_skey_object *) targetKey;
+	int	rv, flags = 0;
+
+	sc_log(context, "Initiating unwrapping with a secret key.");
+
+	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[session->slot->fw_data_idx];
+	if (!fw_data)
+		return sc_to_cryptoki_error(SC_ERROR_INTERNAL, "C_UnwrapKey");
+
+	if (pMechanism == NULL || pWrappedKey == NULL || ulWrappedKeyLen == 0 || targetKeyObj == NULL) {
+		sc_log(context, "One or more of mandatory arguments were NULL.");
+		return CKR_ARGUMENTS_BAD;
+	}
+
+	/* Check whether this key supports unwrap */
+	if (skey && !(skey->info->usage & SC_PKCS15_PRKEY_USAGE_UNWRAP))
+		skey = NULL;
+
+	/* TODO: should we look for a compatible key automatically? prv_next not implemented yet. */
+	/* skey = skey->prv_next; */
+
+	if (skey == NULL)
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	sc_log(context, "Using mechanism %lx.", pMechanism->mechanism);
+	/* Select the proper padding mechanism */
+	switch (pMechanism->mechanism) {
+	case CKM_AES_ECB:
+		flags |= SC_ALGORITHM_AES_ECB;
+		break;
+	case CKM_AES_CBC_PAD:
+		flags |= SC_ALGORITHM_AES_CBC_PAD;
+		break;
+	case CKM_AES_CBC:
+		flags |= SC_ALGORITHM_AES_CBC; /* in this case, pMechanism->pParameter contains IV */
+		break;
+	default:
+		return CKR_MECHANISM_INVALID;
+	}
+
+	rv = sc_lock(p11card->card);
+
+	if (rv < 0)
+		return sc_to_cryptoki_error(rv, "C_UnwrapKey");
+
+	/* Call the card to do the unwrap operation */
+	rv = sc_pkcs15_unwrap(fw_data->p15_card, skey->prv_p15obj, targetKeyObj->prv_p15obj, flags,
+		pWrappedKey, ulWrappedKeyLen, pMechanism->pParameter, pMechanism->ulParameterLen);
+
+	sc_unlock(p11card->card);
+
+	if (rv < 0)
+		return sc_to_cryptoki_error(rv, "C_UnwrapKey");
+
+	return CKR_OK;
+}
+
+/*
+ * Wrap a key using a secret key. obj = wrapping key, targetKey = key to be wrapped.
+ * Wrapped key data is returned in pData
+ */
+
+static CK_RV
+pkcs15_skey_wrap(struct sc_pkcs11_session *session, void *obj,
+			CK_MECHANISM_PTR pMechanism,
+			void *targetKey,
+			CK_BYTE_PTR pData, CK_ULONG_PTR pulDataLen)
+
+{
+	struct	sc_pkcs11_card *p11card;
+	struct	pkcs15_fw_data *fw_data = NULL;
+	struct	pkcs15_skey_object *skey = (struct pkcs15_skey_object *) obj;
+	struct	pkcs15_skey_object *targetKeyObj = (struct pkcs15_skey_object *) targetKey;
+	int rv, flags = 0;
+
+	sc_log(context, "Initializing wrapping with a secret key.");
+
+	if (session == NULL || pMechanism == NULL || obj == NULL || targetKey == NULL) {
+		sc_log(context, "One or more of mandatory arguments were NULL.");
+		return CKR_ARGUMENTS_BAD;
+	}
+
+	p11card = session->slot->p11card;
+	fw_data = (struct pkcs15_fw_data *) p11card->fws_data[session->slot->fw_data_idx];
+
+	if (!fw_data)
+		return sc_to_cryptoki_error(SC_ERROR_INTERNAL, "C_WrapKey");
+
+	/* Verify that the key supports wrapping */
+	if (skey && !(skey->info->usage & SC_PKCS15_PRKEY_USAGE_WRAP))
+		skey = NULL;
+	/* TODO: browse for a key that supports, like other similar funcs */
+
+	if (skey == NULL)
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	sc_log(context, "Using mechanism %lx.", pMechanism->mechanism);
+
+	/* Select the proper padding mechanism */
+	switch (pMechanism->mechanism) {
+	case CKM_AES_ECB:
+		flags |= SC_ALGORITHM_AES_ECB;
+		break;
+	case CKM_AES_CBC_PAD:	/* with CBC, pMechanism->pParameter contains IV */
+		flags |= SC_ALGORITHM_AES_CBC_PAD;
+		break;
+	case CKM_AES_CBC:
+		flags |= SC_ALGORITHM_AES_CBC;
+		break;
+	default:
+		return CKR_MECHANISM_INVALID;
+	}
+
+	rv = sc_lock(p11card->card);
+
+	if (rv < 0)
+		return sc_to_cryptoki_error(rv, "C_UnwrapKey");
+
+	/* Call the card to do the wrapping operation */
+	rv = sc_pkcs15_wrap(fw_data->p15_card, skey->prv_p15obj, targetKeyObj->prv_p15obj, flags,
+		pData, pulDataLen, pMechanism->pParameter, pMechanism->ulParameterLen);
+
+	sc_unlock(p11card->card);
+
+	if (rv < 0)
+		return sc_to_cryptoki_error(rv, "C_UnwrapKey");
 
 	return CKR_OK;
 }
@@ -4517,10 +5018,12 @@ struct sc_pkcs11_object_ops pkcs15_skey_ops = {
 	pkcs15_skey_destroy,
 	NULL,	/* get_size */
 	NULL,	/* sign */
-	NULL,	/* unwrap_key */
+	pkcs15_skey_unwrap,
 	NULL,	/* decrypt */
 	NULL,	/* derive */
-	NULL	/* can_do */
+	NULL,	/* can_do */
+	NULL,	/* init_params */
+	pkcs15_skey_wrap /* wrap_key */
 };
 
 /*
@@ -4716,12 +5219,12 @@ get_usage_bit(unsigned int usage, CK_ATTRIBUTE_PTR attr)
 }
 
 
-static int
+static CK_RV
 register_gost_mechanisms(struct sc_pkcs11_card *p11card, int flags)
 {
 	CK_MECHANISM_INFO mech_info;
 	sc_pkcs11_mechanism_type_t *mt;
-	int rc;
+	CK_RV rc;
 
 	mech_info.flags = CKF_HW | CKF_SIGN | CKF_DECRYPT;
 #ifdef ENABLE_OPENSSL
@@ -4764,13 +5267,13 @@ register_gost_mechanisms(struct sc_pkcs11_card *p11card, int flags)
 }
 
 
-static int register_ec_mechanisms(struct sc_pkcs11_card *p11card, int flags,
+static CK_RV register_ec_mechanisms(struct sc_pkcs11_card *p11card, int flags,
 		unsigned long ext_flags, CK_ULONG min_key_size, CK_ULONG max_key_size)
 {
 	CK_MECHANISM_INFO mech_info;
 	sc_pkcs11_mechanism_type_t *mt;
 	CK_FLAGS ec_flags = 0;
-	int rc;
+	CK_RV rc;
 
 	if (ext_flags & SC_ALGORITHM_EXT_EC_F_P)
 		ec_flags |= CKF_EC_F_P;
@@ -4845,6 +5348,47 @@ static int register_ec_mechanisms(struct sc_pkcs11_card *p11card, int flags,
 	return CKR_OK;
 }
 
+static int sc_pkcs11_register_aes_mechanisms(struct sc_pkcs11_card *p11card, int flags,
+		CK_ULONG min_key_size, CK_ULONG max_key_size)
+{
+	int rc;
+	CK_MECHANISM_INFO mech_info;
+	sc_pkcs11_mechanism_type_t *mt;
+	sc_card_t* card = p11card->card;
+	memset(&mech_info, 0, sizeof(mech_info));
+	mech_info.flags = CKF_ENCRYPT | CKF_DECRYPT;
+	mech_info.ulMinKeySize = min_key_size;
+	mech_info.ulMaxKeySize = max_key_size;
+
+	if ((card->caps & SC_CARD_CAP_UNWRAP_KEY) == SC_CARD_CAP_UNWRAP_KEY)
+		mech_info.flags |= CKF_UNWRAP;
+	if ((card->caps & SC_CARD_CAP_WRAP_KEY) == SC_CARD_CAP_WRAP_KEY)
+		mech_info.flags |= CKF_WRAP;
+
+	mt = sc_pkcs11_new_fw_mechanism(CKM_AES_ECB, &mech_info, CKK_AES, NULL, NULL);
+	if (!mt)
+		return CKR_HOST_MEMORY;
+	rc = sc_pkcs11_register_mechanism(p11card, mt);
+	if (rc != CKR_OK)
+			return rc;
+
+	mt = sc_pkcs11_new_fw_mechanism(CKM_AES_CBC, &mech_info, CKK_AES, NULL, NULL);
+	if (!mt)
+		return CKR_HOST_MEMORY;
+	rc = sc_pkcs11_register_mechanism(p11card, mt);
+	if (rc != CKR_OK)
+			return rc;
+
+	mt = sc_pkcs11_new_fw_mechanism(CKM_AES_CBC_PAD, &mech_info, CKK_AES, NULL, NULL);
+	if (!mt)
+		return CKR_HOST_MEMORY;
+	rc = sc_pkcs11_register_mechanism(p11card, mt);
+	if (rc != CKR_OK)
+			return rc;
+
+	return CKR_OK;
+}
+
 /*
  * Mechanism handling
  * FIXME: We should consult the card's algorithm list to
@@ -4856,11 +5400,13 @@ register_mechanisms(struct sc_pkcs11_card *p11card)
 	sc_card_t *card = p11card->card;
 	sc_algorithm_info_t *alg_info;
 	CK_MECHANISM_INFO mech_info;
-	CK_ULONG ec_min_key_size, ec_max_key_size;
+	CK_ULONG ec_min_key_size, ec_max_key_size,
+		aes_min_key_size, aes_max_key_size;
 	unsigned long ec_ext_flags;
 	sc_pkcs11_mechanism_type_t *mt;
 	unsigned int num;
-	int rc, rsa_flags = 0, ec_flags = 0, gostr_flags = 0;
+	int rsa_flags = 0, ec_flags = 0, gostr_flags = 0, aes_flags = 0;
+	CK_RV rc;
 
 	/* Register generic mechanisms */
 	sc_pkcs11_register_generic_mechanisms(p11card);
@@ -4870,10 +5416,18 @@ register_mechanisms(struct sc_pkcs11_card *p11card)
 	/* That practise definitely conflicts with CKF_HW -- andre 2010-11-28 */
 	mech_info.flags |= CKF_VERIFY;
 #endif
+	if ((card->caps & SC_CARD_CAP_UNWRAP_KEY) == SC_CARD_CAP_UNWRAP_KEY)
+		mech_info.flags |= CKF_UNWRAP;
+	if ((card->caps & SC_CARD_CAP_WRAP_KEY) == SC_CARD_CAP_WRAP_KEY)
+		mech_info.flags |= CKF_WRAP;
+
 	mech_info.ulMinKeySize = ~0;
 	mech_info.ulMaxKeySize = 0;
 	ec_min_key_size = ~0;
 	ec_max_key_size = 0;
+	aes_min_key_size = ~0;
+	aes_max_key_size = 0;
+
 	ec_ext_flags = 0;
 
 	/* For now, we just OR all the algorithm specific
@@ -4900,6 +5454,13 @@ register_mechanisms(struct sc_pkcs11_card *p11card)
 				break;
 			case SC_ALGORITHM_GOSTR3410:
 				gostr_flags |= alg_info->flags;
+				break;
+			case SC_ALGORITHM_AES:
+				aes_flags |= alg_info->flags;
+				if (alg_info->key_length < aes_min_key_size)
+					aes_min_key_size = alg_info->key_length;
+				if (alg_info->key_length > aes_max_key_size)
+					aes_max_key_size = alg_info->key_length;
 				break;
 		}
 		alg_info++;
@@ -4931,21 +5492,28 @@ register_mechanisms(struct sc_pkcs11_card *p11card)
 		/* We support PKCS1 padding in software */
 		/* either the card supports it or OpenSC does */
 		rsa_flags |= SC_ALGORITHM_RSA_PAD_PKCS1;
+#ifdef ENABLE_OPENSSL
+		rsa_flags |= SC_ALGORITHM_RSA_PAD_PSS;
+#endif
+	}
+
+	if (rsa_flags & SC_ALGORITHM_RSA_PAD_ISO9796) {
+		/* Supported in hardware only, if the card driver declares it. */
+		mt = sc_pkcs11_new_fw_mechanism(CKM_RSA_9796, &mech_info, CKK_RSA, NULL, NULL);
+		rc = sc_pkcs11_register_mechanism(p11card, mt);
+		if (rc != CKR_OK)
+			return rc;
 	}
 
 #ifdef ENABLE_OPENSSL
-		/* all our software hashes are in OpenSSL */
-		/* Only if card did not list the hashes, will we
-		 * help it a little, by adding all the OpenSSL hashes
-		 * that have PKCS#11 mechanisms.
-		 */
-		if (!(rsa_flags & SC_ALGORITHM_RSA_HASHES)) {
-			rsa_flags |= SC_ALGORITHM_RSA_HASHES;
-#if OPENSSL_VERSION_NUMBER <  0x00908000L
-		/* turn off hashes not in openssl 0.9.8 */
-			rsa_flags &= ~(SC_ALGORITHM_RSA_HASH_SHA256 | SC_ALGORITHM_RSA_HASH_SHA384 | SC_ALGORITHM_RSA_HASH_SHA512 | SC_ALGORITHM_RSA_HASH_SHA224);
-#endif
-		}
+	/* all our software hashes are in OpenSSL */
+	/* Only if card did not list the hashes, will we
+	 * help it a little, by adding all the OpenSSL hashes
+	 * that have PKCS#11 mechanisms.
+	 */
+	if (!(rsa_flags & (SC_ALGORITHM_RSA_HASHES & ~SC_ALGORITHM_RSA_HASH_NONE))) {
+		rsa_flags |= SC_ALGORITHM_RSA_HASHES;
+	}
 #endif
 
 	/* No need to Check for PKCS1  We support it in software and turned it on above so always added it */
@@ -4961,39 +5529,88 @@ register_mechanisms(struct sc_pkcs11_card *p11card)
 		 * Either the card set the hashes or we helped it above */
 
 		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA1) {
-			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card, CKM_SHA1_RSA_PKCS, CKM_SHA_1, mt);
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA1_RSA_PKCS, CKM_SHA_1, mt);
+			if (rc != CKR_OK)
+				return rc;
+		}
+		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA224) {
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA224_RSA_PKCS, CKM_SHA224, mt);
 			if (rc != CKR_OK)
 				return rc;
 		}
 		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA256) {
-			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card, CKM_SHA256_RSA_PKCS, CKM_SHA256, mt);
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA256_RSA_PKCS, CKM_SHA256, mt);
 			if (rc != CKR_OK)
 				return rc;
 		}
 		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA384) {
-			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card, CKM_SHA384_RSA_PKCS, CKM_SHA384, mt);
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA384_RSA_PKCS, CKM_SHA384, mt);
 			if (rc != CKR_OK)
 				return rc;
 		}
 		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA512) {
-			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card, CKM_SHA512_RSA_PKCS, CKM_SHA512, mt);
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA512_RSA_PKCS, CKM_SHA512, mt);
 			if (rc != CKR_OK)
 				return rc;
 		}
 		if (rsa_flags & SC_ALGORITHM_RSA_HASH_MD5) {
-			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card, CKM_MD5_RSA_PKCS, CKM_MD5, mt);
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_MD5_RSA_PKCS, CKM_MD5, mt);
 			if (rc != CKR_OK)
 				return rc;
 		}
 		if (rsa_flags & SC_ALGORITHM_RSA_HASH_RIPEMD160) {
-			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card, CKM_RIPEMD160_RSA_PKCS, CKM_RIPEMD160, mt);
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_RIPEMD160_RSA_PKCS, CKM_RIPEMD160, mt);
 			if (rc != CKR_OK)
 				return rc;
 		}
 #endif /* ENABLE_OPENSSL */
 	}
 
-	/* TODO support other padding mechanisms */
+	if (rsa_flags & SC_ALGORITHM_RSA_PAD_PSS) {
+		mech_info.flags &= ~(CKF_DECRYPT|CKF_ENCRYPT);
+		mt = sc_pkcs11_new_fw_mechanism(CKM_RSA_PKCS_PSS, &mech_info, CKK_RSA, NULL, NULL);
+		rc = sc_pkcs11_register_mechanism(p11card, mt);
+		if (rc != CKR_OK)
+			return rc;
+
+		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA1) {
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA1_RSA_PKCS_PSS, CKM_SHA_1, mt);
+			if (rc != CKR_OK)
+				return rc;
+		}
+		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA224) {
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA224_RSA_PKCS_PSS, CKM_SHA224, mt);
+			if (rc != CKR_OK)
+				return rc;
+		}
+		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA256) {
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA256_RSA_PKCS_PSS, CKM_SHA256, mt);
+			if (rc != CKR_OK)
+				return rc;
+		}
+		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA384) {
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA384_RSA_PKCS_PSS, CKM_SHA384, mt);
+			if (rc != CKR_OK)
+				return rc;
+		}
+		if (rsa_flags & SC_ALGORITHM_RSA_HASH_SHA512) {
+			rc = sc_pkcs11_register_sign_and_hash_mechanism(p11card,
+				CKM_SHA512_RSA_PKCS_PSS, CKM_SHA512, mt);
+			if (rc != CKR_OK)
+				return rc;
+		}
+	}
 
 	if (rsa_flags & SC_ALGORITHM_ONBOARD_KEY_GEN) {
 		mech_info.flags = CKF_GENERATE_KEY_PAIR;
@@ -5004,6 +5621,11 @@ register_mechanisms(struct sc_pkcs11_card *p11card)
 		if (rc != CKR_OK)
 			return rc;
 	}
+
+	if (aes_max_key_size > 0) {
+		rc = sc_pkcs11_register_aes_mechanisms(p11card, aes_flags, aes_min_key_size, aes_max_key_size);
+	}
+
 
 	return CKR_OK;
 }

@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "../common/compat_strlcpy.h"
 
 #include "pkcs15.h"
 #include "log.h"
@@ -205,8 +206,10 @@ sc_oberthur_get_certificate_authority(struct sc_pkcs15_der *der, int *out_author
 	buf_mem.max = buf_mem.length = der->len;
 
 	bio = BIO_new(BIO_s_mem());
-	if(!bio)
+	if (!bio) {
+		free(buf_mem.data);
 		return SC_ERROR_OUT_OF_MEMORY;
+	}
 
 	BIO_set_mem_buf(bio, &buf_mem, BIO_NOCLOSE);
 	x = d2i_X509_bio(bio, 0);
@@ -685,7 +688,7 @@ sc_pkcs15emu_oberthur_add_cert(struct sc_pkcs15_card *p15card, unsigned int file
 
 	rv = sc_pkcs15emu_add_x509_cert(p15card, &cobj, &cinfo);
 
-	SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, rv);
+	LOG_FUNC_RETURN(p15card->card->ctx, rv);
 }
 
 
@@ -738,7 +741,7 @@ sc_pkcs15emu_oberthur_add_prvkey(struct sc_pkcs15_card *p15card,
 			unsigned int id = path.value[path.len - 2] * 0x100 + path.value[path.len - 1];
 
 			if (id == ccont.id_cert)   {
-				strncpy(kobj.label, objs[ii]->label, sizeof(kobj.label) - 1);
+				strlcpy(kobj.label, objs[ii]->label, sizeof(kobj.label));
 				break;
 			}
 		}
@@ -900,7 +903,7 @@ sc_pkcs15emu_oberthur_add_data(struct sc_pkcs15_card *p15card,
 
 	rv = sc_pkcs15emu_add_data_object(p15card, &dobj, &dinfo);
 
-	SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, rv);
+	LOG_FUNC_RETURN(p15card->card->ctx, rv);
 }
 
 
@@ -1040,8 +1043,8 @@ oberthur_detect_card(struct sc_pkcs15_card * p15card)
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	if (p15card->card->type != SC_CARD_TYPE_OBERTHUR_64K)
-		SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_WRONG_CARD);
-	SC_FUNC_RETURN(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, SC_SUCCESS);
+		LOG_FUNC_RETURN(p15card->card->ctx, SC_ERROR_WRONG_CARD);
+	LOG_FUNC_RETURN(p15card->card->ctx, SC_SUCCESS);
 }
 
 

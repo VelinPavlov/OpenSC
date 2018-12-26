@@ -312,11 +312,15 @@ sc_pkcs15_encode_tokeninfo(sc_context_t *ctx, sc_pkcs15_tokeninfo_t *ti,
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 0, &ti->supported_algos[ii].reference, &reference_len, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 1, &ti->supported_algos[ii].mechanism, &mechanism_len, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 2,
-			asn1_algo_infos_parameters[ii], NULL, 0);
-		sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 0,
-			NULL, NULL, 0);
-		sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 1,
-			&ti->supported_algos[ii].parameters, &parameter_len, 0);
+			asn1_algo_infos_parameters[ii], NULL, 1);
+		if (!ti->supported_algos[ii].parameters)	{
+			sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 0,
+				NULL, NULL, 1);
+		}
+		else {
+			sc_format_asn1_entry(asn1_algo_infos_parameters[ii] + 1,
+				&ti->supported_algos[ii].parameters, &parameter_len, 0);
+		}
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 3, &ti->supported_algos[ii].operations, &operations_len, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 4, &ti->supported_algos[ii].algo_id, NULL, 1);
 		sc_format_asn1_entry(asn1_algo_infos[ii] + 5, &ti->supported_algos[ii].algo_ref, &algo_ref_len, 1);
@@ -438,52 +442,6 @@ fix_authentic_ddo(struct sc_pkcs15_card *p15card)
 		p15card->file_tokeninfo = NULL;
 	}
 }
-
-
-static void
-fix_starcos_pkcs15_card(struct sc_pkcs15_card *p15card)
-{
-	struct sc_context *ctx = p15card->card->ctx;
-
-	/* set special flags based on card meta data */
-	if (strcmp(p15card->card->driver->short_name,"cardos") == 0
-			&& p15card->tokeninfo && p15card->tokeninfo->label) {
-
-		/* D-Trust cards (D-TRUST, D-SIGN) */
-		if (strstr(p15card->tokeninfo->label,"D-TRUST") != NULL
-				|| strstr(p15card->tokeninfo->label,"D-SIGN") != NULL) {
-
-			/* D-TRUST Card 2.0 2cc (standard cards, which always add
-			 * SHA1 prefix itself */
-			if (strstr(p15card->tokeninfo->label, "2cc") != NULL) {
-				p15card->card->caps |= SC_CARD_CAP_ONLY_RAW_HASH_STRIPPED;
-				sc_log(ctx, "D-TRUST 2cc card detected, only SHA1 works with this card");
-				/* XXX: add detection when other hash than SHA1 is used with
-				 *      such a card, as this produces invalid signatures.
-				 */
-			}
-
-			/* D-SIGN multicard 2.0 2ca (cards working with all types of hashes
-			 * and no addition of prefix) */
-			else if (strstr(p15card->tokeninfo->label, "2ca") != NULL) {
-				p15card->card->caps |= SC_CARD_CAP_ONLY_RAW_HASH;
-				sc_log(ctx, "D-TRUST 2ca card detected");
-			}
-
-			/* D-TRUST card 2.4 2ce (cards working with all types of hashes
-			 * and no addition of prefix) */
-			else if (strstr(p15card->tokeninfo->label, "2ce") != NULL) {
-				p15card->card->caps |= SC_CARD_CAP_ONLY_RAW_HASH;
-				sc_log(ctx, "D-TRUST 2ce card detected");
-			}
-
-			/* XXX: probably there are more D-Trust card in the wild,
-			 *      which also need these flags to produce valid signatures
-			 */
-		}
-	}
-}
-
 
 static int
 parse_ddo(struct sc_pkcs15_card *p15card, const u8 * buf, size_t buflen)
@@ -1293,8 +1251,6 @@ sc_pkcs15_bind(struct sc_card *card, struct sc_aid *aid,
 			goto error;
 	}
 done:
-	fix_starcos_pkcs15_card(p15card);
-
 	*p15card_out = p15card;
 	sc_unlock(card);
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
@@ -2544,8 +2500,15 @@ sc_pkcs15_make_absolute_path(const struct sc_path *parent, struct sc_path *child
 void sc_pkcs15_free_object_content(struct sc_pkcs15_object *obj)
 {
 	if (obj->content.value && obj->content.len)   {
-		sc_mem_clear(obj->content.value, obj->content.len);
-		free(obj->content.value);
+		if (SC_PKCS15_TYPE_AUTH & obj->type
+			|| SC_PKCS15_TYPE_SKEY & obj->type
+			|| SC_PKCS15_TYPE_PRKEY & obj->type) {
+			/* clean everything that potentially contains a secret */
+			sc_mem_clear(obj->content.value, obj->content.len);
+			sc_mem_secure_free(obj->content.value, obj->content.len);
+		} else {
+			free(obj->content.value);
+		}
 	}
 	obj->content.value = NULL;
 	obj->content.len = 0;
@@ -2569,7 +2532,13 @@ sc_pkcs15_allocate_object_content(struct sc_context *ctx, struct sc_pkcs15_objec
 	/* Need to pass by temporary variable,
 	 * because 'value' and 'content.value' pointers can be the sames.
 	 */
-	tmp_buf = (unsigned char *)sc_mem_alloc_secure(ctx, len);
+	if (SC_PKCS15_TYPE_AUTH & obj->type
+			|| SC_PKCS15_TYPE_SKEY & obj->type
+			|| SC_PKCS15_TYPE_PRKEY & obj->type) {
+		tmp_buf = sc_mem_secure_alloc(len);
+	} else {
+		tmp_buf = malloc(len);
+	}
 	if (!tmp_buf)
 		return SC_ERROR_OUT_OF_MEMORY;
 
@@ -2594,6 +2563,31 @@ sc_pkcs15_get_supported_algo(struct sc_pkcs15_card *p15card, unsigned operation,
 	for (ii=0;ii<SC_MAX_SUPPORTED_ALGORITHMS && p15card->tokeninfo->supported_algos[ii].reference; ii++)
 		if ((p15card->tokeninfo->supported_algos[ii].operations & operation)
 				&& (p15card->tokeninfo->supported_algos[ii].mechanism == mechanism))
+			break;
+
+	if (ii < SC_MAX_SUPPORTED_ALGORITHMS && p15card->tokeninfo->supported_algos[ii].reference)   {
+		info = &p15card->tokeninfo->supported_algos[ii];
+		sc_log(ctx, "found supported algorithm (ref:%X,mech:%X,ops:%X,algo_ref:%X)",
+				info->reference, info->mechanism, info->operations, info->algo_ref);
+	}
+
+	return info;
+}
+
+struct sc_supported_algo_info *
+sc_pkcs15_get_specific_supported_algo(struct sc_pkcs15_card *p15card, unsigned operation, unsigned mechanism, const struct sc_object_id *algo_oid)
+{
+	struct sc_context *ctx = p15card->card->ctx;
+	struct sc_supported_algo_info *info = NULL;
+	int ii;
+
+	if (algo_oid == NULL)
+		return NULL;
+
+	for (ii=0;ii<SC_MAX_SUPPORTED_ALGORITHMS && p15card->tokeninfo->supported_algos[ii].reference; ii++)
+		if ((p15card->tokeninfo->supported_algos[ii].operations & operation)
+				&& (p15card->tokeninfo->supported_algos[ii].mechanism == mechanism)
+				&& sc_compare_oid(algo_oid, &p15card->tokeninfo->supported_algos[ii].algo_id) == 1)
 			break;
 
 	if (ii < SC_MAX_SUPPORTED_ALGORITHMS && p15card->tokeninfo->supported_algos[ii].reference)   {

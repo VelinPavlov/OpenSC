@@ -1291,7 +1291,7 @@ int cwa_create_secure_channel(sc_card_t * card,
 
 	/* get challenge: retrieve 8 random bytes from card */
 	sc_log(ctx, "Step 8.4.1.11: Prepare External Auth: Get Challenge");
-	res = card->ops->get_challenge(card, sm->icc.rnd, sizeof(sm->icc.rnd));
+	res = sc_get_challenge(card, sm->icc.rnd, sizeof(sm->icc.rnd));
 	if (res != SC_SUCCESS) {
 		msg = "Get Challenge failed";
 		goto csc_end;
@@ -1431,11 +1431,9 @@ int cwa_encode_apdu(sc_card_t * card,
 		   sizeof(u8));
 	ccbuf = calloc(MAX(SC_MAX_APDU_BUFFER_SIZE, 20 + from->datalen),
 		   sizeof(u8));
-	if (!to->resp) {
-		/* if no response create a buffer for the encoded response */
-		to->resp = calloc(MAX_RESP_BUFFER_SIZE, sizeof(u8));
-		to->resplen = MAX_RESP_BUFFER_SIZE;
-	}
+	/* always create a new buffer for the encoded response */
+	to->resp = calloc(MAX_RESP_BUFFER_SIZE, sizeof(u8));
+	to->resplen = MAX_RESP_BUFFER_SIZE;
 	if (!apdubuf || !ccbuf || (!from->resp && !to->resp)) {
 		res = SC_ERROR_OUT_OF_MEMORY;
 		goto err;

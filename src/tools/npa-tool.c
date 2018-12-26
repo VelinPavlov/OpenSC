@@ -22,15 +22,16 @@
 #endif
 
 #ifdef ENABLE_OPENPACE
-#include "npa-tool-cmdline.h"
 #include "fread_to_eof.h"
-#include "sm/sslutil.h"
+#include "npa-tool-cmdline.h"
 #include "sm/sm-eac.h"
+#include "sm/sslutil.h"
+#include "util.h"
 #include <eac/pace.h>
+#include <libopensc/card-npa.h>
 #include <libopensc/log.h>
 #include <libopensc/opensc.h>
 #include <libopensc/sm.h>
-#include <libopensc/card-npa.h>
 #include <sm/sm-eac.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -88,14 +89,15 @@ static int getline(char **lineptr, size_t *n, FILE *stream)
 #define ASN1_APP_IMP_OPT(stname, field, type, tag) ASN1_EX_TYPE(ASN1_TFLG_IMPTAG|ASN1_TFLG_APPLICATION|ASN1_TFLG_OPTIONAL, tag, stname, field, type)
 #define ASN1_APP_IMP(stname, field, type, tag) ASN1_EX_TYPE(ASN1_TFLG_IMPTAG|ASN1_TFLG_APPLICATION, tag, stname, field, type)
 
+typedef ASN1_AUXILIARY_DATA ASN1_AUXILIARY_DATA_NPA_TOOL;
 /* 0x67
  * Auxiliary authenticated data */
-ASN1_ITEM_TEMPLATE(ASN1_AUXILIARY_DATA) = 
+ASN1_ITEM_TEMPLATE(ASN1_AUXILIARY_DATA_NPA_TOOL) = 
 	ASN1_EX_TEMPLATE_TYPE(
 			ASN1_TFLG_SEQUENCE_OF|ASN1_TFLG_IMPTAG|ASN1_TFLG_APPLICATION,
 			7, AuxiliaryAuthenticatedData, CVC_DISCRETIONARY_DATA_TEMPLATE)
-ASN1_ITEM_TEMPLATE_END(ASN1_AUXILIARY_DATA)
-IMPLEMENT_ASN1_FUNCTIONS(ASN1_AUXILIARY_DATA)
+ASN1_ITEM_TEMPLATE_END(ASN1_AUXILIARY_DATA_NPA_TOOL)
+IMPLEMENT_ASN1_FUNCTIONS(ASN1_AUXILIARY_DATA_NPA_TOOL)
 
 /** 
  * @brief Print binary data to a file stream
@@ -110,59 +112,7 @@ IMPLEMENT_ASN1_FUNCTIONS(ASN1_AUXILIARY_DATA)
 			label, (unsigned int) len, len==1?"":"s", len==0?"":":\n", sc_dump_hex(data, len)); \
 	}
 
-static int initialize(int reader_id, int verbose,
-		sc_context_t **ctx, sc_reader_t **reader)
-{
-	unsigned int i, reader_count;
-	int r;
-
-	if (!ctx || !reader)
-		return SC_ERROR_INVALID_ARGUMENTS;
-
-	r = sc_establish_context(ctx, "");
-	if (r < 0 || !*ctx) {
-		fprintf(stderr, "Failed to create initial context: %s", sc_strerror(r));
-		return r;
-	}
-
-	(*ctx)->debug = verbose;
-	(*ctx)->flags |= SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER;
-
-	reader_count = sc_ctx_get_reader_count(*ctx);
-
-	if (reader_count == 0) {
-		sc_debug(*ctx, SC_LOG_DEBUG_NORMAL, "No reader not found.\n");
-		return SC_ERROR_NO_READERS_FOUND;
-	}
-
-	if (reader_id < 0) {
-		/* Automatically try to skip to a reader with a card if reader not specified */
-		for (i = 0; i < reader_count; i++) {
-			*reader = sc_ctx_get_reader(*ctx, i);
-			if (sc_detect_card_presence(*reader) & SC_READER_CARD_PRESENT) {
-				reader_id = i;
-				sc_debug(*ctx, SC_LOG_DEBUG_NORMAL, "Using the first reader"
-						" with a card: %s", (*reader)->name);
-				break;
-			}
-		}
-		if ((unsigned int) reader_id >= reader_count) {
-			sc_debug(*ctx, SC_LOG_DEBUG_NORMAL, "No card found, using the first reader.");
-			reader_id = 0;
-		}
-	}
-
-	if ((unsigned int) reader_id >= reader_count) {
-		sc_debug(*ctx, SC_LOG_DEBUG_NORMAL, "Invalid reader number "
-				"(%d), only %d available.\n", reader_id, reader_count);
-		return SC_ERROR_NO_READERS_FOUND;
-	}
-
-	*reader = sc_ctx_get_reader(*ctx, reader_id);
-
-	return SC_SUCCESS;
-}
-
+static const char *app_name = "npa-tool";
 
 static void read_dg(sc_card_t *card, unsigned char sfid, const char *dg_str,
 		unsigned char **dg, size_t *dg_len)
@@ -260,7 +210,7 @@ int npa_translate_apdus(sc_card_t *card, FILE *input)
 
 		r = sc_bytes2apdu(card->ctx, buf, apdulen, &apdu);
 		if (r < 0) {
-			sc_debug_hex(card->ctx, SC_LOG_DEBUG_NORMAL, "Invalid C-APDU", buf, apdulen);
+			sc_log_hex(card->ctx, "Invalid C-APDU", buf, apdulen);
 			continue;
 		}
 
@@ -285,8 +235,8 @@ int npa_translate_apdus(sc_card_t *card, FILE *input)
 	return r;
 }
 
-static int add_to_ASN1_AUXILIARY_DATA(
-		ASN1_AUXILIARY_DATA **auxiliary_data,
+static int add_to_ASN1_AUXILIARY_DATA_NPA_TOOL(
+		ASN1_AUXILIARY_DATA_NPA_TOOL **auxiliary_data,
 		int nid, const unsigned char *data, size_t data_len)
 {
 	int r;
@@ -298,7 +248,7 @@ static int add_to_ASN1_AUXILIARY_DATA(
 	}
 
 	if (!*auxiliary_data) {
-		*auxiliary_data = ASN1_AUXILIARY_DATA_new();
+		*auxiliary_data = ASN1_AUXILIARY_DATA_NPA_TOOL_new();
 		if (!*auxiliary_data) {
 			r = SC_ERROR_INTERNAL;
 			goto err;
@@ -360,7 +310,7 @@ main (int argc, char **argv)
 
 	sc_context_t *ctx = NULL;
 	sc_card_t *card = NULL;
-	sc_reader_t *reader = NULL;
+	sc_context_param_t ctx_param;
 
 	int r, tr_version = EAC_TR_VERSION_2_02;
 	struct establish_pace_channel_input pace_input;
@@ -372,7 +322,7 @@ main (int argc, char **argv)
 	unsigned char *certs_chat = NULL;
 	unsigned char *dg = NULL;
 	size_t dg_len = 0;
-	ASN1_AUXILIARY_DATA *templates = NULL;
+	ASN1_AUXILIARY_DATA_NPA_TOOL *templates = NULL;
 	unsigned char *ef_cardsecurity = NULL;
 	size_t ef_cardsecurity_len = 0;
 
@@ -427,23 +377,25 @@ main (int argc, char **argv)
 		eac_default_flags |= EAC_FLAG_DISABLE_CHECK_CA;
 
 
-	r = initialize(cmdline.reader_arg, cmdline.verbose_given, &ctx, &reader);
-	if (r < 0) {
-		fprintf(stderr, "Can't initialize reader\n");
+	memset(&ctx_param, 0, sizeof(ctx_param));
+	ctx_param.ver      = 0;
+	ctx_param.app_name = app_name;
+
+	r = sc_context_create(&ctx, &ctx_param);
+	if (r) {
+		fprintf(stderr, "Failed to establish context: %s\n", sc_strerror(r));
 		exit(1);
 	}
 
-	if (sc_connect_card(reader, &card) < 0) {
-		fprintf(stderr, "Could not connect to card\n");
-		sc_release_context(ctx);
-		exit(1);
-	}
+	r = util_connect_card_ex(ctx, &card, cmdline.reader_arg, 0, 0, cmdline.verbose_given);
+	if (r)
+		goto err;
 
 	EAC_init();
 	if (cmdline.cvc_dir_given)
 		EAC_set_cvc_default_dir(cmdline.cvc_dir_arg);
 	if (cmdline.x509_dir_given)
-		EAC_set_x509_default_dir(cmdline.cvc_dir_arg);
+		EAC_set_x509_default_dir(cmdline.x509_dir_arg);
 
 	if (cmdline.break_flag) {
 		/* The biggest number sprintf could write with "%llu is 18446744073709551615 */
@@ -671,7 +623,7 @@ main (int argc, char **argv)
 				}
 			} else {
 				if (cmdline.older_than_given) {
-					r = add_to_ASN1_AUXILIARY_DATA(&templates,
+					r = add_to_ASN1_AUXILIARY_DATA_NPA_TOOL(&templates,
 							NID_id_DateOfBirth,
 							(unsigned char *) cmdline.older_than_arg,
 							strlen(cmdline.older_than_arg));
@@ -679,7 +631,7 @@ main (int argc, char **argv)
 						goto err;
 				}
 				if (cmdline.verify_validity_given) {
-					r = add_to_ASN1_AUXILIARY_DATA(&templates,
+					r = add_to_ASN1_AUXILIARY_DATA_NPA_TOOL(&templates,
 							NID_id_DateOfExpiry,
 							(unsigned char *) cmdline.verify_validity_arg,
 							strlen(cmdline.verify_validity_arg));
@@ -693,7 +645,7 @@ main (int argc, char **argv)
 						fprintf(stderr, "Could not parse community ID.\n");
 						exit(2);
 					}
-					r = add_to_ASN1_AUXILIARY_DATA(&templates,
+					r = add_to_ASN1_AUXILIARY_DATA_NPA_TOOL(&templates,
 							NID_id_CommunityID,
 							community_id, community_id_len);
 					if (r < 0)
@@ -701,7 +653,7 @@ main (int argc, char **argv)
 				}
 				if (templates) {
 					unsigned char *p = NULL;
-					auxiliary_data_len = i2d_ASN1_AUXILIARY_DATA(
+					auxiliary_data_len = i2d_ASN1_AUXILIARY_DATA_NPA_TOOL(
 							templates, &p);
 					if (0 > (int) auxiliary_data_len
 							|| auxiliary_data_len > sizeof auxiliary_data) {
@@ -892,7 +844,7 @@ err:
 	free(privkey);
 	free(dg);
 	if (templates)
-		ASN1_AUXILIARY_DATA_free(templates);
+		ASN1_AUXILIARY_DATA_NPA_TOOL_free(templates);
 
 	sc_sm_stop(card);
 	sc_reset(card, 1);

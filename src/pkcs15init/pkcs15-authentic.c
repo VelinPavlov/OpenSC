@@ -355,7 +355,6 @@ authentic_sdo_allocate_prvkey(struct sc_profile *profile, struct sc_card *card,
 		sc_file_free(file);
 		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate 'sc_authentic_sdo'");
 	}
-	*out = sdo;
 
 	sdo->magic = AUTHENTIC_SDO_MAGIC;
 	sdo->docp.id = key_info->key_reference &  ~AUTHENTIC_OBJECT_REF_FLAG_LOCAL;
@@ -364,11 +363,16 @@ authentic_sdo_allocate_prvkey(struct sc_profile *profile, struct sc_card *card,
 	rv = authentic_docp_set_acls(card, file, authentic_v3_rsa_ac_ops,
 			sizeof(authentic_v3_rsa_ac_ops)/sizeof(authentic_v3_rsa_ac_ops[0]), &sdo->docp);
 	sc_file_free(file);
-	LOG_TEST_RET(ctx, rv, "Cannot set key ACLs from file");
+	if (rv != SC_SUCCESS) {
+		free(sdo);
+		sc_log(ctx, "Cannot set key ACLs from file");
+		LOG_FUNC_RETURN(ctx, rv);
+	}
 
 	sc_log(ctx, "sdo(mech:%X,id:%X,acls:%s)", sdo->docp.mech, sdo->docp.id,
 			sc_dump_hex(sdo->docp.acl_data, sdo->docp.acl_data_len));
 
+	*out = sdo;
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
 
@@ -551,7 +555,10 @@ authentic_pkcs15_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p
 		| SC_PKCS15_PRKEY_ACCESS_SENSITIVE;
 
 	rv = authentic_sdo_allocate_prvkey(profile, card, key_info, &sdo);
-	LOG_TEST_RET(ctx, rv, "IasEcc: init SDO private key failed");
+	if (rv != SC_SUCCESS || sdo == NULL) {
+		sc_log(ctx, "IasEcc: init SDO private key failed");
+		LOG_FUNC_RETURN(ctx, rv);
+	}
 
 	rv = sc_card_ctl(card, SC_CARDCTL_AUTHENTIC_SDO_CREATE, sdo);
 	if (rv == SC_ERROR_FILE_ALREADY_EXISTS)   {
@@ -560,20 +567,20 @@ authentic_pkcs15_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p
 		p15card->card->caps &= ~SC_CARD_CAP_USE_FCI_AC;
 		rv = sc_pkcs15init_authenticate(profile, p15card, file_p_prvkey, SC_AC_OP_DELETE);
 		p15card->card->caps = caps;
-		LOG_TEST_RET(ctx, rv, "SC_AC_OP_CRYPTO authentication failed for parent DF");
+		LOG_TEST_GOTO_ERR(ctx, rv, "SC_AC_OP_CRYPTO authentication failed for parent DF");
 
 		rv = sc_card_ctl(card, SC_CARDCTL_AUTHENTIC_SDO_DELETE, sdo);
-		LOG_TEST_RET(ctx, rv, "SC_CARDCTL_AUTHENTIC_SDO_DELETE failed for private key");
+		LOG_TEST_GOTO_ERR(ctx, rv, "SC_CARDCTL_AUTHENTIC_SDO_DELETE failed for private key");
 
 		rv = sc_card_ctl(card, SC_CARDCTL_AUTHENTIC_SDO_CREATE, sdo);
 	}
-	LOG_TEST_RET(ctx, rv, "SC_CARDCTL_AUTHENTIC_SDO_CREATE failed");
+	LOG_TEST_GOTO_ERR(ctx, rv, "SC_CARDCTL_AUTHENTIC_SDO_CREATE failed");
 
 	rv = authentic_pkcs15_fix_access(p15card, file_p_prvkey, object);
-	LOG_TEST_RET(ctx, rv, "cannot fix access rules for private key");
+	LOG_TEST_GOTO_ERR(ctx, rv, "cannot fix access rules for private key");
 
 	rv = authentic_pkcs15_fix_usage(p15card, object);
-	LOG_TEST_RET(ctx, rv, "cannot fix access rules for private key");
+	LOG_TEST_GOTO_ERR(ctx, rv, "cannot fix access rules for private key");
 
 	/* Here fix the key's supported algorithms, if these ones will be implemented
 	 * (see src/libopensc/pkcs15-prkey.c).
@@ -583,8 +590,10 @@ authentic_pkcs15_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p
 	sc_log(ctx, "sdo->file:%p", sdo->file);
 
 	rv = sc_pkcs15_allocate_object_content(ctx, object, (unsigned char *)sdo, sizeof(struct sc_authentic_sdo));
-	LOG_TEST_RET(ctx, rv, "Failed to allocate PrvKey SDO as object content");
+	LOG_TEST_GOTO_ERR(ctx, rv, "Failed to allocate PrvKey SDO as object content");
 
+err:
+	free(sdo);
 	LOG_FUNC_RETURN(ctx, rv);
 }
 

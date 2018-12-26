@@ -57,9 +57,14 @@ static const struct sc_card_error iso7816_errors[] = {
 	{ 0x6282, SC_ERROR_FILE_END_REACHED,	"End of file/record reached before reading Le bytes" },
 	{ 0x6283, SC_ERROR_CARD_CMD_FAILED,	"Selected file invalidated" },
 	{ 0x6284, SC_ERROR_CARD_CMD_FAILED,	"FCI not formatted according to ISO 7816-4" },
+	{ 0x6285, SC_ERROR_CARD_CMD_FAILED,	"Selected file in termination state" },
+	{ 0x6286, SC_ERROR_CARD_CMD_FAILED,	"No input data available from a sensor on the card" },
 
 	{ 0x6300, SC_ERROR_CARD_CMD_FAILED,	"Warning: no information given, non-volatile memory has changed" },
 	{ 0x6381, SC_ERROR_CARD_CMD_FAILED,	"Warning: file filled up by last write" },
+
+	{ 0x6400, SC_ERROR_CARD_CMD_FAILED,	"Execution error" },
+	{ 0x6401, SC_ERROR_CARD_CMD_FAILED,	"Immediate response required by the card" },
 
 	{ 0x6581, SC_ERROR_MEMORY_FAILURE,	"Memory failure" },
 
@@ -68,37 +73,36 @@ static const struct sc_card_error iso7816_errors[] = {
 	{ 0x6800, SC_ERROR_NO_CARD_SUPPORT,	"Functions in CLA not supported" },
 	{ 0x6881, SC_ERROR_NO_CARD_SUPPORT,	"Logical channel not supported" },
 	{ 0x6882, SC_ERROR_NO_CARD_SUPPORT,	"Secure messaging not supported" },
+	{ 0x6883, SC_ERROR_CARD_CMD_FAILED,	"Last command of the chain expected" },
+	{ 0x6884, SC_ERROR_NO_CARD_SUPPORT,	"Command chaining not supported" },
 
 	{ 0x6900, SC_ERROR_NOT_ALLOWED,		"Command not allowed" },
 	{ 0x6981, SC_ERROR_CARD_CMD_FAILED,	"Command incompatible with file structure" },
-	{ 0x6982, SC_ERROR_SECURITY_STATUS_NOT_SATISFIED, "Security status not satisfied" },
+	{ 0x6982, SC_ERROR_SECURITY_STATUS_NOT_SATISFIED,"Security status not satisfied" },
 	{ 0x6983, SC_ERROR_AUTH_METHOD_BLOCKED,	"Authentication method blocked" },
 	{ 0x6984, SC_ERROR_REF_DATA_NOT_USABLE,	"Referenced data not usable" },
 	{ 0x6985, SC_ERROR_NOT_ALLOWED,		"Conditions of use not satisfied" },
 	{ 0x6986, SC_ERROR_NOT_ALLOWED,		"Command not allowed (no current EF)" },
 	{ 0x6987, SC_ERROR_INCORRECT_PARAMETERS,"Expected SM data objects missing" },
-	{ 0x6988, SC_ERROR_INCORRECT_PARAMETERS,"SM data objects incorrect" },
+	{ 0x6988, SC_ERROR_INCORRECT_PARAMETERS,"Incorrect SM data objects" },
 
 	{ 0x6A00, SC_ERROR_INCORRECT_PARAMETERS,"Wrong parameter(s) P1-P2" },
 	{ 0x6A80, SC_ERROR_INCORRECT_PARAMETERS,"Incorrect parameters in the data field" },
 	{ 0x6A81, SC_ERROR_NO_CARD_SUPPORT,	"Function not supported" },
-	{ 0x6A82, SC_ERROR_FILE_NOT_FOUND,	"File not found" },
+	{ 0x6A82, SC_ERROR_FILE_NOT_FOUND,	"File or application not found" },
 	{ 0x6A83, SC_ERROR_RECORD_NOT_FOUND,	"Record not found" },
 	{ 0x6A84, SC_ERROR_NOT_ENOUGH_MEMORY,	"Not enough memory space in the file" },
 	{ 0x6A85, SC_ERROR_INCORRECT_PARAMETERS,"Lc inconsistent with TLV structure" },
 	{ 0x6A86, SC_ERROR_INCORRECT_PARAMETERS,"Incorrect parameters P1-P2" },
 	{ 0x6A87, SC_ERROR_INCORRECT_PARAMETERS,"Lc inconsistent with P1-P2" },
 	{ 0x6A88, SC_ERROR_DATA_OBJECT_NOT_FOUND,"Referenced data not found" },
-	{ 0x6A89, SC_ERROR_FILE_ALREADY_EXISTS,  "File already exists"},
-	{ 0x6A8A, SC_ERROR_FILE_ALREADY_EXISTS,  "DF name already exists"},
+	{ 0x6A89, SC_ERROR_FILE_ALREADY_EXISTS,	"File already exists"},
+	{ 0x6A8A, SC_ERROR_FILE_ALREADY_EXISTS,	"DF name already exists"},
 
 	{ 0x6B00, SC_ERROR_INCORRECT_PARAMETERS,"Wrong parameter(s) P1-P2" },
 	{ 0x6D00, SC_ERROR_INS_NOT_SUPPORTED,	"Instruction code not supported or invalid" },
 	{ 0x6E00, SC_ERROR_CLASS_NOT_SUPPORTED,	"Class not supported" },
 	{ 0x6F00, SC_ERROR_CARD_CMD_FAILED,	"No precise diagnosis" },
-
-
-
 };
 
 
@@ -408,7 +412,7 @@ iso7816_process_fci(struct sc_card *card, struct sc_file *file,
 					memcpy(file->name, p, length);
 					file->namelen = length;
 
-					sc_debug_hex(ctx, SC_LOG_DEBUG_NORMAL, "  File name:", file->name, file->namelen);
+					sc_log_hex(ctx, "  File name:", file->name, file->namelen);
 					if (!file->type)
 						file->type = SC_FILE_TYPE_DF;
 				}
@@ -621,12 +625,6 @@ iso7816_get_challenge(struct sc_card *card, u8 *rnd, size_t len)
 	int r;
 	struct sc_apdu apdu;
 
-	if (len == 0)
-		return SC_SUCCESS;
-
-	if (!rnd)
-		return SC_ERROR_INVALID_ARGUMENTS;
-
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_2, 0x84, 0x00, 0x00);
 	apdu.le = len;
 	apdu.resp = rnd;
@@ -635,14 +633,14 @@ iso7816_get_challenge(struct sc_card *card, u8 *rnd, size_t len)
 	r = sc_transmit_apdu(card, &apdu);
 	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
-	if (apdu.resplen != len) {
-		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-		if (r == SC_SUCCESS) {
-			r = SC_ERROR_WRONG_LENGTH;
-		}
-	}
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE failed");
 
-	return r;
+	if (len < apdu.resplen) {
+		return (int) len;
+	}
+   
+	return (int) apdu.resplen;
 }
 
 
@@ -786,7 +784,7 @@ iso7816_delete_file(struct sc_card *card, const sc_path_t *path)
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	if (path->type != SC_PATH_TYPE_FILE_ID || (path->len != 0 && path->len != 2)) {
 		sc_log(card->ctx, "File type has to be SC_PATH_TYPE_FILE_ID");
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INVALID_ARGUMENTS);
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
 	if (path->len == 2) {
@@ -843,13 +841,18 @@ iso7816_set_security_env(struct sc_card *card,
 	if (env->flags & SC_SEC_ENV_FILE_REF_PRESENT) {
 		if (env->file_ref.len > 0xFF)
 			return SC_ERROR_INVALID_ARGUMENTS;
+		if (sizeof(sbuf) - (p - sbuf) < env->file_ref.len + 2)
+			return SC_ERROR_OFFSET_TOO_LARGE;
+
 		*p++ = 0x81;
 		*p++ = (u8) env->file_ref.len;
-		assert(sizeof(sbuf) - (p - sbuf) >= env->file_ref.len);
 		memcpy(p, env->file_ref.value, env->file_ref.len);
 		p += env->file_ref.len;
 	}
 	if (env->flags & SC_SEC_ENV_KEY_REF_PRESENT) {
+		if (sizeof(sbuf) - (p - sbuf) < env->key_ref_len + 2)
+			return SC_ERROR_OFFSET_TOO_LARGE;
+
 		if (env->flags & SC_SEC_ENV_KEY_REF_SYMMETRIC)
 			*p++ = 0x83;
 		else
@@ -857,7 +860,6 @@ iso7816_set_security_env(struct sc_card *card,
 		if (env->key_ref_len > 0xFF)
 			return SC_ERROR_INVALID_ARGUMENTS;
 		*p++ = env->key_ref_len & 0xFF;
-		assert(sizeof(sbuf) - (p - sbuf) >= env->key_ref_len);
 		memcpy(p, env->key_ref, env->key_ref_len);
 		p += env->key_ref_len;
 	}
@@ -1205,17 +1207,17 @@ static int iso7816_get_data(struct sc_card *card, unsigned int tag,  u8 *buf, si
 	apdu.resp = buf;
 	apdu.resplen = len;
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "GET_DATA returned error");
+	LOG_TEST_RET(card->ctx, r, "GET_DATA returned error");
 
 	if (apdu.resplen > len)
 		r = SC_ERROR_WRONG_LENGTH;
 	else
 		r = apdu.resplen;
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 
@@ -1271,7 +1273,9 @@ static struct sc_card_operations iso_ops = {
 	NULL,			/* put_data */
 	NULL,			/* delete_record */
 	NULL,			/* read_public_key */
-	NULL			/* card_reader_lock_obtained */
+	NULL,			/* card_reader_lock_obtained */
+	NULL,			/* wrap */
+	NULL			/* unwrap */
 };
 
 static struct sc_card_driver iso_driver = {
@@ -1320,9 +1324,13 @@ int iso7816_read_binary_sfid(sc_card_t *card, unsigned char sfid,
 	apdu.le = read;
 
 	r = sc_transmit_apdu(card, &apdu);
+	if (r < 0)
+		goto err;
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	if (r < 0 && r != SC_ERROR_FILE_END_REACHED)
+		goto err;
 	/* emulate the behaviour of sc_read_binary */
-	if (r >= 0)
-		r = apdu.resplen;
+	r = apdu.resplen;
 
 	while(1) {
 		if (r >= 0 && ((size_t) r) != read) {

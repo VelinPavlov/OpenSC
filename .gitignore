@@ -49,7 +49,6 @@ tags
 *.gz
 *.bz2
 *.[0-9]
-*.html
 *.gif
 *.css
 *.out
@@ -57,6 +56,7 @@ tags
 *.obj
 *.exp
 *.res
+*.ggo
 ChangeLog
 
 doc/tools/cardos-tool
@@ -76,9 +76,13 @@ doc/tools/pkcs15-tool
 doc/tools/sc-hsm-tool
 doc/tools/westcos-tool
 doc/tools/dnie-tool
+doc/tools/egk-tool
+doc/tools/npa-tool
+doc/tools/opensc-asn1
+doc/tools/opensc-notify
+doc/files/opensc.conf.5.xml
 
-etc/opensc.conf.win
-etc/opensc.conf
+etc/opensc.conf.example
 src/common/compat_getopt_main
 src/minidriver/opensc-minidriver.inf
 src/tools/cardos-tool
@@ -102,6 +106,10 @@ src/tools/pkcs11-tool
 src/tools/dnie-tool
 src/tools/npa-tool
 src/tools/sceac-example
+src/tools/opensc-notify
+src/tools/org.opensc.notify.desktop
+src/tools/opensc-asn1
+src/tools/egk-tool
 
 win32/OpenSC.iss
 win32/OpenSC.wxs
@@ -128,5 +136,6 @@ src/tests/lottery
 src/tests/p15dump
 src/tests/pintest
 src/tests/prngtest
+src/tests/p11test/p11test
 
 version.m4.ci

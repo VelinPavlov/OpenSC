@@ -45,6 +45,7 @@
 /* #include "sm.h" */
 #include "pkcs15.h"
 /* #include "hash-strings.h" */
+#include "gp.h"
 
 #include "iasecc.h"
 
@@ -69,7 +70,7 @@ static struct sc_card_driver iasecc_drv = {
 	NULL, 0, NULL
 };
 
-static struct sc_atr_table iasecc_known_atrs[] = {
+static const struct sc_atr_table iasecc_known_atrs[] = {
 	{ "3B:7F:96:00:00:00:31:B8:64:40:70:14:10:73:94:01:80:82:90:00",
 	  "FF:FF:FF:FF:FF:FF:FF:FE:FF:FF:00:00:FF:FF:FF:FF:FF:FF:FF:FF",
 		"IAS/ECC Gemalto", SC_CARD_TYPE_IASECC_GEMALTO,  0, NULL },
@@ -90,12 +91,6 @@ static struct sc_atr_table iasecc_known_atrs[] = {
 	{ NULL, NULL, NULL, 0, 0, NULL }
 };
 
-static struct sc_aid GlobalPlatform_CardManager_AID = {
-	{ 0xA0,0x00,0x00,0x00,0x03,0x00,0x00}, 7
-};
-static struct sc_aid GlobalPlatform_ISD_Default_RID = {
-	{ 0xA0,0x00,0x00,0x01,0x51,0x00,0x00}, 7
-};
 static struct sc_aid OberthurIASECC_AID = {
 	{0xA0,0x00,0x00,0x00,0x77,0x01,0x08,0x00,0x07,0x00,0x00,0xFE,0x00,0x00,0x01,0x00}, 16
 };
@@ -477,8 +472,6 @@ static int
 iasecc_init_oberthur(struct sc_card *card)
 {
 	struct sc_context *ctx = card->ctx;
-	unsigned char resp[0x100];
-	size_t resp_len;
 	unsigned int flags;
 	int rv = 0;
 
@@ -495,10 +488,9 @@ iasecc_init_oberthur(struct sc_card *card)
 
 	iasecc_parse_ef_atr(card);
 
-	resp_len = sizeof(resp);
-	if (iasecc_select_aid(card, &GlobalPlatform_CardManager_AID, resp, &resp_len))   {
-		resp_len = sizeof(resp);
-		iasecc_select_aid(card, &GlobalPlatform_ISD_Default_RID, resp, &resp_len);
+	/* if we fail to select CM, */
+	if (gp_select_card_manager(card)) {
+		gp_select_isd_rid(card);
 	}
 
 	rv = iasecc_oberthur_match(card);
@@ -606,7 +598,7 @@ iasecc_init(struct sc_card *card)
 	else if (card->type == SC_CARD_TYPE_IASECC_MI)
 		rv = iasecc_init_amos_or_sagem(card);
 	else
-		LOG_FUNC_RETURN(ctx, SC_ERROR_NO_CARD_SUPPORT);
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_CARD);
 
 
 	if (!rv)   {
@@ -623,7 +615,7 @@ iasecc_init(struct sc_card *card)
 			LOG_TEST_RET(ctx, rv, "Select EF.ATR AID failed");
 		}
 
-		rv = iasecc_get_serialnr(card, NULL);
+		iasecc_get_serialnr(card, NULL);
 	}
 
 #ifdef ENABLE_SM
@@ -833,16 +825,16 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 	sc_log(ctx, "iasecc_select_file() path:%s", sc_print_path(path));
 
 	sc_print_cache(card);
-	if (lpath.len >= 2 && lpath.value[0] == 0x3F && lpath.value[1] == 0x00)   {
+	if (path->type != SC_PATH_TYPE_DF_NAME
+			&& lpath.len >= 2
+			&& lpath.value[0] == 0x3F && lpath.value[1] == 0x00)   {
 		sc_log(ctx, "EF.ATR(aid:'%s')", card->ef_atr ? sc_dump_hex(card->ef_atr->aid.value, card->ef_atr->aid.len) : "");
 
 		rv = iasecc_select_mf(card, file_out);
 		LOG_TEST_RET(ctx, rv, "MF selection error");
 
-		if (lpath.len >= 2 && lpath.value[0] == 0x3F && lpath.value[1] == 0x00)	   {
-			memmove(&lpath.value[0], &lpath.value[2], lpath.len - 2);
-			lpath.len -=  2;
-		}
+		memmove(&lpath.value[0], &lpath.value[2], lpath.len - 2);
+		lpath.len -=  2;
 	}
 
 	if (lpath.aid.len)	{
@@ -1335,6 +1327,29 @@ iasecc_create_file(struct sc_card *card, struct sc_file *file)
 	LOG_TEST_RET(ctx, rv, "Cannot select newly created file");
 
 	LOG_FUNC_RETURN(ctx, rv);
+}
+
+static int
+iasecc_get_challenge(struct sc_card *card, u8 * rnd, size_t len)
+{
+	/* As IAS/ECC cannot handle other data length than 0x08 */
+	u8 rbuf[8];
+	size_t out_len;
+	int r;
+
+	LOG_FUNC_CALLED(card->ctx);
+
+	r = iso_ops->get_challenge(card, rbuf, sizeof rbuf);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE cmd failed");
+
+	if (len < (size_t) r) {
+		out_len = len;
+	} else {
+		out_len = (size_t) r;
+	}
+	memcpy(rnd, rbuf, out_len);
+
+	LOG_FUNC_RETURN(card->ctx, (int) out_len);
 }
 
 
@@ -2127,21 +2142,27 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 
 	if (card->cache.valid && card->cache.current_df)   {
 		sc_file_dup(&save_current_df, card->cache.current_df);
-		if (save_current_df == NULL)
-			LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot duplicate current DF file");
+		if (save_current_df == NULL) {
+			rv = SC_ERROR_OUT_OF_MEMORY;
+			sc_log(ctx, "Cannot duplicate current DF file");
+			goto err;
+		}
 	}
 
 	if (card->cache.valid && card->cache.current_ef)   {
 		sc_file_dup(&save_current_ef, card->cache.current_ef);
-		if (save_current_ef == NULL)
-			LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot duplicate current EF file");
+		if (save_current_ef == NULL) {
+			rv = SC_ERROR_OUT_OF_MEMORY;
+			sc_log(ctx, "Cannot duplicate current EF file");
+			goto err;
+		}
 	}
 
 	if (!(data->pin_reference & IASECC_OBJECT_REF_LOCAL) && card->cache.valid && card->cache.current_df) {
 		sc_format_path("3F00", &path);
 		path.type = SC_PATH_TYPE_FILE_ID;
 		rv = iasecc_select_file(card, &path, NULL);
-		LOG_TEST_RET(ctx, rv, "Unable to select MF");
+		LOG_TEST_GOTO_ERR(ctx, rv, "Unable to select MF");
 	}
 
 	memset(&sdo, 0, sizeof(sdo));
@@ -2152,10 +2173,13 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 	sc_log(ctx, "iasecc_pin_get_policy() reference %i", sdo.sdo_ref);
 
 	rv = iasecc_sdo_get_data(card, &sdo);
-	LOG_TEST_RET(ctx, rv, "Cannot get SDO PIN data");
+	LOG_TEST_GOTO_ERR(ctx, rv, "Cannot get SDO PIN data");
 
-	if (sdo.docp.acls_contact.size == 0)
-		LOG_TEST_RET(ctx, SC_ERROR_INVALID_DATA, "Extremely strange ... there is no ACLs");
+	if (sdo.docp.acls_contact.size == 0) {
+		rv = SC_ERROR_INVALID_DATA;
+		sc_log(ctx, "Extremely strange ... there is no ACLs");
+		goto err;
+	}
 
 	sc_log(ctx,
 	       "iasecc_pin_get_policy() sdo.docp.size.size %"SC_FORMAT_LEN_SIZE_T"u",
@@ -2183,13 +2207,13 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 			se.reference = acl->key_ref;
 
 			rv = iasecc_se_get_info(card, &se);
-			LOG_TEST_RET(ctx, rv, "SDO get data error");
+			LOG_TEST_GOTO_ERR(ctx, rv, "SDO get data error");
 		}
 
 		if (scb & IASECC_SCB_METHOD_USER_AUTH)   {
 			rv = iasecc_se_get_crt_by_usage(card, &se,
 					IASECC_CRT_TAG_AT, IASECC_UQB_AT_USER_PASSWORD, &acl->crts[crt_num]);
-			LOG_TEST_RET(ctx, rv, "no authentication template for 'USER PASSWORD'");
+			LOG_TEST_GOTO_ERR(ctx, rv, "no authentication template for 'USER PASSWORD'");
 			sc_log(ctx, "iasecc_pin_get_policy() scb:0x%X; sdo_ref:[%i,%i,...]",
 					scb, acl->crts[crt_num].refs[0], acl->crts[crt_num].refs[1]);
 			crt_num++;
@@ -2233,16 +2257,18 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 	if (save_current_df)   {
 		sc_log(ctx, "iasecc_pin_get_policy() restore current DF");
 		rv = iasecc_select_file(card, &save_current_df->path, NULL);
-		LOG_TEST_RET(ctx, rv, "Cannot return to saved DF");
-		sc_file_free(save_current_df);
+		LOG_TEST_GOTO_ERR(ctx, rv, "Cannot return to saved DF");
 	}
 
 	if (save_current_ef)   {
 		sc_log(ctx, "iasecc_pin_get_policy() restore current EF");
 		rv = iasecc_select_file(card, &save_current_ef->path, NULL);
-		LOG_TEST_RET(ctx, rv, "Cannot return to saved EF");
-		sc_file_free(save_current_ef);
+		LOG_TEST_GOTO_ERR(ctx, rv, "Cannot return to saved EF");
 	}
+
+err:
+	sc_file_free(save_current_df);
+	sc_file_free(save_current_ef);
 
 	LOG_FUNC_RETURN(ctx, rv);
 }
@@ -2380,7 +2406,11 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 		sc_format_path("3F00", &path);
 		path.type = SC_PATH_TYPE_FILE_ID;
 		rv = iasecc_select_file(card, &path, NULL);
-		LOG_TEST_RET(ctx, rv, "Unable to select MF");
+		if (rv != SC_SUCCESS) {
+			sc_file_free(save_current);
+			sc_log(ctx, "Unable to select MF");
+			LOG_FUNC_RETURN(ctx, rv);
+		}
 	}
 
 	memset(&sdo, 0, sizeof(sdo));
@@ -2499,6 +2529,12 @@ iasecc_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_le
 static int
 iasecc_get_serialnr(struct sc_card *card, struct sc_serial_number *serial)
 {
+#if 1
+	/* the current implementation doesn't perform any bounds check when parsing
+	 * the serial number. Hence, we disable this code until someone has time to
+	 * fix this. */
+	LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+#else
 	struct sc_context *ctx = card->ctx;
 	struct sc_iin *iin = &card->serialnr.iin;
 	struct sc_apdu apdu;
@@ -2543,7 +2579,7 @@ iasecc_get_serialnr(struct sc_card *card, struct sc_serial_number *serial)
 	if (card->type == SC_CARD_TYPE_IASECC_SAGEM)   {
 		/* 5A 0A 92 50 00 20 10 10 25 00 01 3F */
 		/*            00 02 01 01 02 50 00 13  */
-		for (ii=0; ii < rbuf[1] - offs; ii++)
+		for (ii=0; (ii < rbuf[1] - offs) && (ii + offs + 2 < sizeof(rbuf)); ii++)
 			*(card->serialnr.value + ii) = ((rbuf[ii + offs + 1] & 0x0F) << 4)
 				+ ((rbuf[ii + offs + 2] & 0xF0) >> 4) ;
 		card->serialnr.len = ii;
@@ -2568,6 +2604,7 @@ end:
 		memcpy(serial, &card->serialnr, sizeof(*serial));
 
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+#endif
 }
 
 
@@ -3119,7 +3156,6 @@ iasecc_qsign_data_sha1(struct sc_context *ctx, const unsigned char *in, size_t i
 }
 
 
-#if OPENSSL_VERSION_NUMBER >= 0x00908000L
 static int
 iasecc_qsign_data_sha256(struct sc_context *ctx, const unsigned char *in, size_t in_len,
 				struct iasecc_qsign_data *out)
@@ -3170,7 +3206,6 @@ iasecc_qsign_data_sha256(struct sc_context *ctx, const unsigned char *in, size_t
 
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
-#endif
 
 
 static int
@@ -3201,11 +3236,7 @@ iasecc_compute_signature_dst(struct sc_card *card,
 		rv = iasecc_qsign_data_sha1(card->ctx, in, in_len, &qsign_data);
 	}
 	else if (env->algorithm_flags & SC_ALGORITHM_RSA_HASH_SHA256)   {
-#if OPENSSL_VERSION_NUMBER >= 0x00908000L
 		rv = iasecc_qsign_data_sha256(card->ctx, in, in_len, &qsign_data);
-#else
-		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "SHA256 is not supported by OpenSSL previous to v0.9.8");
-#endif
 	}
 	else
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Need RSA_HASH_SHA1 or RSA_HASH_SHA256 algorithm");
@@ -3451,9 +3482,12 @@ iasecc_get_free_reference(struct sc_card *card, struct iasecc_ctl_get_free_refer
 
 			sc_log(ctx, "found empty key slot %i", idx);
 			break;
+		} else if (rv != SC_SUCCESS) {
+			iasecc_sdo_free(card, sdo);
+
+			sc_log(ctx, "get new key reference failed");
+			LOG_FUNC_RETURN(ctx, rv);
 		}
-		else
-			LOG_TEST_RET(ctx, rv, "get new key reference failed");
 
 		sz = *(sdo->docp.size.value + 0) * 0x100 + *(sdo->docp.size.value + 1);
 		sc_log(ctx,
@@ -3549,7 +3583,7 @@ sc_get_driver(void)
 	/*	update_record: Untested	*/
 	iasecc_ops.select_file = iasecc_select_file;
 	/*	get_response: Untested	*/
-	/*	get_challenge: ISO7816 implementation works	*/
+	iasecc_ops.get_challenge = iasecc_get_challenge;
 	iasecc_ops.logout = iasecc_logout;
 	/*	restore_security_env	*/
 	iasecc_ops.set_security_env = iasecc_set_security_env;

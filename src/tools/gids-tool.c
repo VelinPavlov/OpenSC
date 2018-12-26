@@ -39,9 +39,7 @@
 #include <openssl/opensslconf.h>
 #include <openssl/crypto.h>
 #endif
-#if OPENSSL_VERSION_NUMBER >= 0x00907000L
 #include <openssl/conf.h>
-#endif
 
 #include <openssl/evp.h>
 #include <openssl/err.h>
@@ -345,7 +343,9 @@ static int gids_get_DO(sc_card_t* card, int fileIdentifier, int dataObjectIdenti
 	if (datasize > *responselen) {
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
-	memcpy(response, p, datasize);
+	if (response) {
+		memcpy(response, p, datasize);
+	}
 	*responselen = datasize;
 	return SC_SUCCESS;
 }
@@ -528,7 +528,7 @@ int main(int argc, char * argv[])
 
 
 	/* OpenSSL magic */
-#if (OPENSSL_VERSION_NUMBER >= 0x00907000L && OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 	OPENSSL_config(NULL);
 #endif
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)

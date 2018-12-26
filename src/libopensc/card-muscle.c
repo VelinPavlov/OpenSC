@@ -42,7 +42,7 @@ static struct sc_card_driver muscle_drv = {
 	NULL, 0, NULL
 };
 
-static struct sc_atr_table muscle_atrs[] = {
+static const struct sc_atr_table muscle_atrs[] = {
 	/* Tyfone JCOP 242R2 cards */
 	{ "3b:6d:00:00:ff:54:79:66:6f:6e:65:20:32:34:32:52:32", NULL, NULL, SC_CARD_TYPE_MUSCLE_JCOP242R2_NO_EXT_APDU, 0, NULL },
 	/* Aladdin eToken PRO USB 72K Java */
@@ -94,9 +94,11 @@ static int muscle_match_card(sc_card_t *card)
 		apdu.resp = response;
 		r = sc_transmit_apdu(card, &apdu);
 		if (r == SC_SUCCESS && response[0] == 0x01) {
-				card->type = SC_CARD_TYPE_MUSCLE_V1;
-				return 1;
+			card->type = SC_CARD_TYPE_MUSCLE_V1;
+		} else {
+			card->type = SC_CARD_TYPE_MUSCLE_GENERIC;
 		}
+		return 1;
 	}
 	return 0;
 }
@@ -203,7 +205,7 @@ static int muscle_read_binary(sc_card_t *card, unsigned int idx, u8* buf, size_t
 	mscfs_file_t *file;
 
 	r = mscfs_check_selection(fs, -1);
-	if(r < 0) SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	if(r < 0) LOG_FUNC_RETURN(card->ctx, r);
 	file = &fs->cache.array[fs->currentFileIndex];
 	objectId = file->objectId;
 	/* memcpy(objectId.id, file->objectId.id, 4); */
@@ -213,7 +215,7 @@ static int muscle_read_binary(sc_card_t *card, unsigned int idx, u8* buf, size_t
 		oid[2] = oid[3] = 0;
 	}
 	r = msc_read_object(card, objectId, idx, buf, count);
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int muscle_update_binary(sc_card_t *card, unsigned int idx, const u8* buf, size_t count, unsigned long flags)
@@ -225,7 +227,7 @@ static int muscle_update_binary(sc_card_t *card, unsigned int idx, const u8* buf
 	u8* oid = objectId.id;
 
 	r = mscfs_check_selection(fs, -1);
-	if(r < 0) SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	if(r < 0) LOG_FUNC_RETURN(card->ctx, r);
 	file = &fs->cache.array[fs->currentFileIndex];
 
 	objectId = file->objectId;
@@ -238,7 +240,7 @@ static int muscle_update_binary(sc_card_t *card, unsigned int idx, const u8* buf
 	if(file->size < idx + count) {
 		int newFileSize = idx + count;
 		u8* buffer = malloc(newFileSize);
-		if(buffer == NULL) SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+		if(buffer == NULL) LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 
 		r = msc_read_object(card, objectId, 0, buffer, file->size);
 		/* TODO: RETRIEVE ACLS */
@@ -253,7 +255,7 @@ static int muscle_update_binary(sc_card_t *card, unsigned int idx, const u8* buf
 		file->size = newFileSize;
 update_bin_free_buffer:
 		free(buffer);
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+		LOG_FUNC_RETURN(card->ctx, r);
 	} else {
 		r = msc_update_object(card, objectId, idx, buf, count);
 	}
@@ -275,7 +277,7 @@ static int muscle_delete_mscfs_file(sc_card_t *card, mscfs_file_t *file_data)
 		/* Delete children */
 		mscfs_check_cache(fs);
 
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(card->ctx, 
 			"DELETING Children of: %02X%02X%02X%02X\n",
 			oid[0],oid[1],oid[2],oid[3]);
 		for(x = 0; x < fs->cache.size; x++) {
@@ -284,7 +286,7 @@ static int muscle_delete_mscfs_file(sc_card_t *card, mscfs_file_t *file_data)
 			objectId = childFile->objectId;
 
 			if(0 == memcmp(oid + 2, objectId.id, 2)) {
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+				sc_log(card->ctx, 
 					"DELETING: %02X%02X%02X%02X\n",
 					objectId.id[0],objectId.id[1],
 					objectId.id[2],objectId.id[3]);
@@ -376,7 +378,7 @@ static int select_item(sc_card_t *card, const sc_path_t *path_in, sc_file_t ** f
 
 	/* Check if its the right type */
 	if(requiredType >= 0 && requiredType != file_data->ef) {
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INVALID_ARGUMENTS);
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 	oid = file_data->objectId.id;
 	/* Is it a file or directory */
@@ -453,11 +455,12 @@ static int _listFile(mscfs_file_t *file, int reset, void *udata)
 static int muscle_init(sc_card_t *card)
 {
 	muscle_private_t *priv;
+	int r;
 
 	card->name = "MuscleApplet";
 	card->drv_data = malloc(sizeof(muscle_private_t));
 	if(!card->drv_data) {
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 	}
 	memset(card->drv_data, 0, sizeof(muscle_private_t));
 	priv = MUSCLE_DATA(card);
@@ -465,7 +468,7 @@ static int muscle_init(sc_card_t *card)
 	priv->fs = mscfs_new();
 	if(!priv->fs) {
 		free(card->drv_data);
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 	}
 	priv->fs->udata = card;
 	priv->fs->listFile = _listFile;
@@ -476,17 +479,19 @@ static int muscle_init(sc_card_t *card)
 	card->caps |= SC_CARD_CAP_RNG;
 
 	/* Card type detection */
-	if (_sc_match_atr(card, muscle_atrs, &card->type) < 0)   {
-		free(priv->fs);
-		free(card->drv_data);
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_NOT_SUPPORTED);
+	r = _sc_match_atr(card, muscle_atrs, &card->type);
+	if (r < 0) {
+		sc_log(card->ctx, "Failed to match the ATRs");
 	}
-
 	if(card->type == SC_CARD_TYPE_MUSCLE_ETOKEN_72K) {
 		card->caps |= SC_CARD_CAP_APDU_EXT;
 	}
 	if(card->type == SC_CARD_TYPE_MUSCLE_JCOP241) {
 		card->caps |= SC_CARD_CAP_APDU_EXT;
+	}
+	if (!(card->caps & SC_CARD_CAP_APDU_EXT)) {
+		card->max_recv_size = 255;
+		card->max_send_size = 255;
 	}
 	if(card->type == SC_CARD_TYPE_MUSCLE_JCOP242R2_NO_EXT_APDU) {
 	        /* Tyfone JCOP v242R2 card that doesn't support extended APDUs */
@@ -517,8 +522,10 @@ static int muscle_list_files(sc_card_t *card, u8 *buf, size_t bufLen)
 	mscfs_check_cache(priv->fs);
 
 	for(x = 0; x < fs->cache.size; x++) {
-		u8* oid= fs->cache.array[x].objectId.id;
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		u8* oid = fs->cache.array[x].objectId.id;
+		if (bufLen < 2)
+			break;
+		sc_log(card->ctx, 
 			"FILE: %02X%02X%02X%02X\n",
 			oid[0],oid[1],oid[2],oid[3]);
 		if(0 == memcmp(fs->currentPath, oid, 2)) {
@@ -526,7 +533,8 @@ static int muscle_list_files(sc_card_t *card, u8 *buf, size_t bufLen)
 			buf[1] = oid[3];
 			if(buf[0] == 0x00 && buf[1] == 0x00) continue; /* No directories/null names outside of root */
 			buf += 2;
-			count+=2;
+			count += 2;
+			bufLen -= 2;
 		}
 	}
 	return count;
@@ -557,7 +565,7 @@ static int muscle_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *cmd,
 		case SC_AC_AUT:
 		case SC_AC_NONE:
 		default:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsupported authentication method\n");
+			sc_log(card->ctx,  "Unsupported authentication method\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 	case SC_PIN_CMD_CHANGE:
@@ -573,7 +581,7 @@ static int muscle_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *cmd,
 		case SC_AC_AUT:
 		case SC_AC_NONE:
 		default:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsupported authentication method\n");
+			sc_log(card->ctx,  "Unsupported authentication method\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 	case SC_PIN_CMD_UNBLOCK:
@@ -589,11 +597,11 @@ static int muscle_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *cmd,
 		case SC_AC_AUT:
 		case SC_AC_NONE:
 		default:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsupported authentication method\n");
+			sc_log(card->ctx,  "Unsupported authentication method\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 	default:
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsupported command\n");
+		sc_log(card->ctx,  "Unsupported command\n");
 		return SC_ERROR_NOT_SUPPORTED;
 
 	}
@@ -670,34 +678,34 @@ static int muscle_set_security_env(sc_card_t *card,
 
 	if (env->operation != SC_SEC_OPERATION_SIGN &&
 	    env->operation != SC_SEC_OPERATION_DECIPHER) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Invalid crypto operation supplied.\n");
+		sc_log(card->ctx,  "Invalid crypto operation supplied.\n");
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 	if (env->algorithm != SC_ALGORITHM_RSA) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Invalid crypto algorithm supplied.\n");
+		sc_log(card->ctx,  "Invalid crypto algorithm supplied.\n");
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 	/* ADJUST FOR PKCS1 padding support for decryption only */
 	if ((env->algorithm_flags & SC_ALGORITHM_RSA_PADS) ||
 	    (env->algorithm_flags & SC_ALGORITHM_RSA_HASHES)) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Card supports only raw RSA.\n");
+		sc_log(card->ctx,  "Card supports only raw RSA.\n");
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 	if (env->flags & SC_SEC_ENV_KEY_REF_PRESENT) {
 		if (env->key_ref_len != 1 ||
 		    (env->key_ref[0] > 0x0F)) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Invalid key reference supplied.\n");
+			sc_log(card->ctx,  "Invalid key reference supplied.\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 		priv->rsa_key_ref = env->key_ref[0];
 	}
 	if (env->flags & SC_SEC_ENV_ALG_REF_PRESENT) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Algorithm reference not supported.\n");
+		sc_log(card->ctx,  "Algorithm reference not supported.\n");
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 	/* if (env->flags & SC_SEC_ENV_FILE_REF_PRESENT)
 		if (memcmp(env->file_ref.value, "\x00\x12", 2) != 0) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "File reference is not 0012.\n");
+			sc_log(card->ctx,  "File reference is not 0012.\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		} */
 	priv->env = *env;
@@ -728,7 +736,7 @@ static int muscle_decipher(sc_card_t * card,
 	key_id = priv->rsa_key_ref * 2; /* Private key */
 
 	if (out_len < crgram_len) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Output buffer too small");
+		sc_log(card->ctx,  "Output buffer too small");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
@@ -740,7 +748,7 @@ static int muscle_decipher(sc_card_t * card,
 		out,
 		crgram_len,
 		out_len);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card signature failed");
+	LOG_TEST_RET(card->ctx, r, "Card signature failed");
 	return r;
 }
 
@@ -754,7 +762,7 @@ static int muscle_compute_signature(sc_card_t *card, const u8 *data,
 	key_id = priv->rsa_key_ref * 2; /* Private key */
 
 	if (outlen < data_len) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Output buffer too small");
+		sc_log(card->ctx,  "Output buffer too small");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
@@ -766,7 +774,7 @@ static int muscle_compute_signature(sc_card_t *card, const u8 *data,
 		out,
 		data_len,
 		outlen);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card signature failed");
+	LOG_TEST_RET(card->ctx, r, "Card signature failed");
 	return r;
 }
 
@@ -774,8 +782,12 @@ static int muscle_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
 	if (len == 0)
 		return SC_SUCCESS;
-	else
-		return msc_get_challenge(card, len, 0, NULL, rnd);
+	else {
+		LOG_TEST_RET(card->ctx,
+				msc_get_challenge(card, len, 0, NULL, rnd),
+				"GET CHALLENGE cmd failed");
+		return (int) len;
+	}
 }
 
 static int muscle_check_sw(sc_card_t * card, unsigned int sw1, unsigned int sw2) {

@@ -33,7 +33,7 @@
 
 #define _FINEID_BROKEN_SELECT_FLAG 1
 
-static struct sc_atr_table setcos_atrs[] = {
+static const struct sc_atr_table setcos_atrs[] = {
 	/* some Nokia branded SC */
 	{ "3B:1F:11:00:67:80:42:46:49:53:45:10:52:66:FF:81:90:00", NULL, NULL, SC_CARD_TYPE_SETCOS_GENERIC, 0, NULL },
 	/* RSA SecurID 3100 */
@@ -130,7 +130,7 @@ static int setcos_match_card(sc_card_t *card)
 				card->type = SC_CARD_TYPE_SETCOS_EID_V2_1;
 			else {
 				buf[sizeof(buf) - 1] = '\0';
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "SetCOS EID applet %s is not supported", (char *) buf);
+				sc_log(card->ctx,  "SetCOS EID applet %s is not supported", (char *) buf);
 				return 0;
 			}
 			return 1;
@@ -473,7 +473,7 @@ static int setcos_create_file_44(sc_card_t *card, sc_file_t *file)
 				break;
 			case SC_AC_CHV:				/* pin */
 				if ((bNumber & 0x7F) == 0 || (bNumber & 0x7F) > 7) {
-					sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "SetCOS 4.4 PIN refs can only be 1..7\n");
+					sc_log(card->ctx,  "SetCOS 4.4 PIN refs can only be 1..7\n");
 					return SC_ERROR_INVALID_ARGUMENTS;
 				}
 				bCommands_pin[setcos_pin_index_44(pins, sizeof(pins), (int) bNumber)] |= 1 << i;
@@ -575,11 +575,11 @@ static int setcos_set_security_env2(sc_card_t *card,
 	    card->type == SC_CARD_TYPE_SETCOS_NIDEL ||
 	    SETCOS_IS_EID_APPLET(card)) {
 		if (env->flags & SC_SEC_ENV_KEY_REF_SYMMETRIC) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "symmetric keyref not supported.\n");
+			sc_log(card->ctx,  "symmetric keyref not supported.\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 		if (se_num > 0) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "restore security environment not supported.\n");
+			sc_log(card->ctx,  "restore security environment not supported.\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 	}
@@ -634,19 +634,19 @@ static int setcos_set_security_env2(sc_card_t *card,
 	apdu.resplen = 0;
 	if (se_num > 0) {
 		r = sc_lock(card);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "sc_lock() failed");
+		LOG_TEST_RET(card->ctx, r, "sc_lock() failed");
 		locked = 1;
 	}
 	if (apdu.datalen != 0) {
 		r = sc_transmit_apdu(card, &apdu);
 		if (r) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx, 
 				"%s: APDU transmit failed", sc_strerror(r));
 			goto err;
 		}
 		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 		if (r) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx, 
 				"%s: Card returned error", sc_strerror(r));
 			goto err;
 		}
@@ -656,7 +656,7 @@ static int setcos_set_security_env2(sc_card_t *card,
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0xF2, se_num);
 	r = sc_transmit_apdu(card, &apdu);
 	sc_unlock(card);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	return sc_check_sw(card, apdu.sw1, apdu.sw2);
 err:
 	if (locked)
@@ -674,7 +674,7 @@ static int setcos_set_security_env(sc_card_t *card,
 		tmp.flags &= ~SC_SEC_ENV_ALG_PRESENT;
 		tmp.flags |= SC_SEC_ENV_ALG_REF_PRESENT;
 		if (tmp.algorithm != SC_ALGORITHM_RSA) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Only RSA algorithm supported.\n");
+			sc_log(card->ctx,  "Only RSA algorithm supported.\n");
 			return SC_ERROR_NOT_SUPPORTED;
 		}
 		switch (card->type) {
@@ -687,7 +687,7 @@ static int setcos_set_security_env(sc_card_t *card,
 		case SC_CARD_TYPE_SETCOS_EID_V2_1:
 			break;
 		default:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Card does not support RSA.\n");
+			sc_log(card->ctx,  "Card does not support RSA.\n");
 			return SC_ERROR_NOT_SUPPORTED;
 			break;
 		}
@@ -788,15 +788,17 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 
 	/* Check all sub-AC definitions within the total AC */
 	while (len > 1) {				/* minimum length = 2 */
-		int	iACLen   = buf[iOffset] & 0x0F;
+		size_t iACLen   = buf[iOffset] & 0x0F;
+		if (iACLen > len)
+			break;
 
 		iPinCount = -1;			/* default no pin required */
 		iMethod = SC_AC_NONE;		/* default no authentication required */
 
 		if (buf[iOffset] & 0X80) { /* AC in adaptive coding */
 			/* Evaluates only the command-byte, not the optional P1/P2/Option bytes */
-			int	iParmLen = 1;			/* command-byte is always present */
-			int	iKeyLen  = 0;			/* Encryption key is optional */
+			size_t	iParmLen = 1;			/* command-byte is always present */
+			size_t	iKeyLen  = 0;			/* Encryption key is optional */
 
 			if (buf[iOffset]   & 0x20) iKeyLen++;
 			if (buf[iOffset+1] & 0x40) iParmLen++;
@@ -806,7 +808,10 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 
 			/* Get KeyNumber if available */
 			if(iKeyLen) {
-				int iSC = buf[iOffset+iACLen];
+				int iSC;
+				if (len < 1+(size_t)iACLen)
+					break;
+				iSC = buf[iOffset+iACLen];
 
 				switch( (iSC>>5) & 0x03 ){
 				case 0:
@@ -825,11 +830,15 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 
 			/* Get PinNumber if available */
 			if (iACLen > (1+iParmLen+iKeyLen)) {  /* check via total length if pin is present */
+				if (len < 1+1+1+(size_t)iParmLen)
+					break;
 				iKeyRef = buf[iOffset+1+1+iParmLen];  /* PTL + AM-header + parameter-bytes */
 				iMethod = SC_AC_CHV;
 			}
 
 			/* Convert SETCOS command to OpenSC command group */
+			if (len < 1+2)
+				break;
 			switch(buf[iOffset+2]){
 			case 0x2A:			/* crypto operation */
 				iOperation = SC_AC_OP_CRYPTO;
@@ -863,7 +872,10 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 			iPinCount = iACLen - 1;		
 
 			if (buf[iOffset] & 0x20) {
-				int iSC = buf[iOffset + iACLen];
+				int iSC;
+				if (len < 1 + (size_t)iACLen)
+					break;
+				iSC = buf[iOffset + iACLen];
 
 				switch( (iSC>>5) & 0x03 ) {
 				case 0:
@@ -884,6 +896,8 @@ static void parse_sec_attr_44(sc_file_t *file, const u8 *buf, size_t len)
 
 			/* Pin present ? */
 			if ( iPinCount > 0 ) {
+				if (len < 1 + 2)
+					break;
 				iKeyRef = buf[iOffset + 2];	/* pin ref */
 				iMethod = SC_AC_CHV;
 			}
@@ -938,7 +952,7 @@ static int setcos_list_files(sc_card_t *card, u8 * buf, size_t buflen)
 	apdu.resplen = buflen;
 	apdu.le = buflen > 256 ? 256 : buflen;
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 	if (card->type == SC_CARD_TYPE_SETCOS_44 && apdu.sw1 == 0x6A && apdu.sw2 == 0x82)
 		return 0; /* no files found */
 	if (apdu.resplen == 0)
@@ -984,12 +998,12 @@ static int setcos_putdata(struct sc_card *card, struct sc_cardctl_setcos_data_ob
 	apdu.data    = data_obj->Data;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "PUT_DATA returned error");
+	LOG_TEST_RET(card->ctx, r, "PUT_DATA returned error");
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 /* Read internal data, e.g. get RSA public key */
@@ -1015,17 +1029,17 @@ static int setcos_getdata(struct sc_card *card, struct sc_cardctl_setcos_data_ob
 	apdu.resplen = data_obj->DataLen;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "GET_DATA returned error");
+	LOG_TEST_RET(card->ctx, r, "GET_DATA returned error");
 
 	if (apdu.resplen > data_obj->DataLen)
 		r = SC_ERROR_WRONG_LENGTH;
 	else
 		data_obj->DataLen = apdu.resplen;
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 /* Generate or store a key */
@@ -1071,12 +1085,12 @@ static int setcos_generate_store_key(sc_card_t *card,
 	apdu.lc	= len;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "STORE/GENERATE_KEY returned error");
+	LOG_TEST_RET(card->ctx, r, "STORE/GENERATE_KEY returned error");
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int setcos_activate_file(sc_card_t *card)
@@ -1089,12 +1103,12 @@ static int setcos_activate_file(sc_card_t *card)
 	apdu.data = sbuf;
 
 	r = sc_transmit_apdu(card, &apdu);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
 
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "ACTIVATE_FILE returned error");
+	LOG_TEST_RET(card->ctx, r, "ACTIVATE_FILE returned error");
 
-	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int setcos_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)

@@ -106,18 +106,25 @@ typedef struct _pgp_manuf_map {
 } pgp_manuf_map_t;
 
 static const pgp_manuf_map_t manuf_map[] = {
-	{ 0x0001, "PPC Card Systems" },
-	{ 0x0002, "Prism"            },
-	{ 0x0003, "OpenFortress"     },
-	{ 0x0004, "Wewid AB"         },
-	{ 0x0005, "ZeitControl"      },
-	{ 0x0006, "Yubico"           },
-	{ 0x0007, "OpenKMS"          },
-	{ 0x0008, "LogoEmail"        },
-	{ 0x002A, "Magrathea"        },
-	{ 0xF517, "FSIJ"             },
-	{ 0x0000, "test card"        },
-	{ 0xffff, "test card"        },
+	{ 0x0001, "PPC Card Systems"   },
+	{ 0x0002, "Prism"              },
+	{ 0x0003, "OpenFortress"       },
+	{ 0x0004, "Wewid AB"           },
+	{ 0x0005, "ZeitControl"        },
+	{ 0x0006, "Yubico"             },
+	{ 0x0007, "OpenKMS"            },
+	{ 0x0008, "LogoEmail"          },
+	{ 0x0009, "Fidesmo"            },
+	{ 0x000A, "Dangerous Things"   },
+	{ 0x002A, "Magrathea"          },
+	{ 0x0042, "GnuPG e.V."         },
+	{ 0x1337, "Warsaw Hackerspace" },
+	{ 0x2342, "warpzone"           },
+	{ 0x63AF, "Trustica"           },
+	{ 0xBD0E, "Paranoidlabs"       },
+	{ 0xF517, "FSIJ"               },
+	{ 0x0000, "test card"          },
+	{ 0xffff, "test card"          },
 	{ 0, NULL }
 };
 
@@ -204,7 +211,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 	if ((r = read_file(card, "006E:0073:00C4", c4data, sizeof(c4data))) < 0)
 		goto failed;
 	if (r != 7) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx, 
 			"CHV status bytes have unexpected length (expected 7, got %d)\n", r);
 		return SC_ERROR_OBJECT_NOT_VALID;
 	}
@@ -252,7 +259,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 	if ((r = read_file(card, "006E:0073:00C5", c5data, sizeof(c5data))) < 0)
 		goto failed;
 	if (r != 60) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx, 
 			"finger print bytes have unexpected length (expected 60, got %d)\n", r);
 		return SC_ERROR_OBJECT_NOT_VALID;
 	}
@@ -272,7 +279,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 		if ((r = read_file(card, path_template, cxdata, sizeof(cxdata))) < 0)
 			goto failed;
 		if (r != 6) {
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Key info bytes have unexpected length (expected 6, got %d)\n", r);
+			sc_log(ctx,  "Key info bytes have unexpected length (expected 6, got %d)\n", r);
 			return SC_ERROR_INTERNAL;
 		}
 
@@ -316,7 +323,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 		if ((r = read_file(card, path_template, cxdata, sizeof(cxdata))) < 0)
 			goto failed;
 		if (r != 6) {
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Key info bytes have unexpected length (expected 6, got %d)\n", r);
+			sc_log(ctx,  "Key info bytes have unexpected length (expected 6, got %d)\n", r);
 			return SC_ERROR_INTERNAL;
 		}
 
@@ -378,7 +385,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 
 failed:
 	if (r < 0) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(card->ctx, 
 				"Failed to initialize OpenPGP emulation: %s\n",
 				sc_strerror(r));
 	}

@@ -78,7 +78,7 @@ extern int dnie_read_file(
  * Override APDU response error codes from iso7816.c to allow 
  * handling of SM specific error
  */
-static struct sc_card_error dnie_errors[] = {
+static const struct sc_card_error dnie_errors[] = {
 	{0x6688, SC_ERROR_SM, "Cryptographic checksum invalid"},
 	{0x6987, SC_ERROR_SM, "Expected SM Data Object missing"},
 	{0x6988, SC_ERROR_SM, "SM Data Object incorrect"},
@@ -163,7 +163,7 @@ const char *user_consent_message="Esta a punto de realizar una firma digital\nco
  */
 char *user_consent_msgs[] = { "SETTITLE", "SETDESC", "CONFIRM", "BYE" };
 
-#ifdef linux
+#if !defined(__APPLE__) && !defined(_WIN32)
 /**
  * Do fgets() without interruptions.
  *
@@ -203,7 +203,7 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 	CFStringRef header_ref; /* to store title */
 	CFStringRef message_ref; /* to store message */
 #endif
-#ifdef linux
+#if !defined(__APPLE__) && !defined(_WIN32)
 	pid_t pid;
 	FILE *fin=NULL;
 	FILE *fout=NULL;	/* to handle pipes as streams */
@@ -271,7 +271,7 @@ int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *
 	if( result == kCFUserNotificationAlternateResponse )
 		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 	LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_ALLOWED);
-#elif linux
+#else
 	/* check that user_consent_app exists. TODO: check if executable */
 	res = stat(GET_DNIE_UI_CTX(card).user_consent_app, &st_file);
 	if (res != 0) {
@@ -361,8 +361,6 @@ do_error:
 	/* close out channel to force client receive EOF and also die */
 	if (fout != NULL) fclose(fout);
 	if (fin != NULL) fclose(fin);
-#else
-#error "Don't know how to handle user consent in this (rare) Operating System"
 #endif
 	if (msg != NULL)
 		sc_log(card->ctx, "%s", msg);
@@ -760,15 +758,25 @@ static int dnie_sm_free_wrapped_apdu(struct sc_card *card,
 
 	if ((*sm_apdu) != plain) {
 		rv = cwa_decode_response(card, provider, *sm_apdu);
-		if (plain) {
-			plain->resplen = (*sm_apdu)->resplen;
+		if (plain && rv == SC_SUCCESS) {
+			if (plain->resp) {
+				/* copy the response into the original resp buffer */
+				if ((*sm_apdu)->resplen <= plain->resplen) {
+					memcpy(plain->resp, (*sm_apdu)->resp, (*sm_apdu)->resplen);
+					plain->resplen = (*sm_apdu)->resplen;
+				} else {
+					sc_log(card->ctx, "Invalid initial length,"
+							" needed %"SC_FORMAT_LEN_SIZE_T"u bytes"
+							" but has %"SC_FORMAT_LEN_SIZE_T"u",
+							(*sm_apdu)->resplen, plain->resplen);
+					rv = SC_ERROR_BUFFER_TOO_SMALL;
+				}
+			}
 			plain->sw1 = (*sm_apdu)->sw1;
 			plain->sw2 = (*sm_apdu)->sw2;
-			if (((*sm_apdu)->data) != plain->data)
-				free((unsigned char *) (*sm_apdu)->data);
-			if ((*sm_apdu)->resp != plain->resp)
-				free((*sm_apdu)->resp);
 		}
+		free((unsigned char *) (*sm_apdu)->data);
+		free((*sm_apdu)->resp);
 		free(*sm_apdu);
 	}
 	*sm_apdu = NULL;
@@ -1340,51 +1348,27 @@ static int dnie_select_file(struct sc_card *card,
  * @param len requested challenge length
  * @return SC_SUCCESS if OK; else error code
  */
-#define BUFFER_SIZE 8
 
 static int dnie_get_challenge(struct sc_card *card, u8 * rnd, size_t len)
 {
-	sc_apdu_t apdu;
-	u8 buf[MAX_RESP_BUFFER_SIZE];
-	int result = SC_SUCCESS;
-	if ((card == NULL) || (card->ctx == NULL))
-		return SC_ERROR_INVALID_ARGUMENTS;
-	LOG_FUNC_CALLED(card->ctx);
-	/* just a copy of iso7816::get_challenge() but call dnie_check_sw to
-	 * look for extra error codes */
-	if ( (rnd==NULL) || (len==0) ) {
-		/* no valid buffer provided */
-		result = SC_ERROR_INVALID_ARGUMENTS;
-		goto dnie_get_challenge_error;
-	}
-	dnie_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00, BUFFER_SIZE, 0,
-					buf, MAX_RESP_BUFFER_SIZE, NULL, 0);
+	/* As DNIe cannot handle other data length than 0x08 and 0x14 */
+	u8 rbuf[8];
+	size_t out_len;
+	int r;
 
-	/* 
-	* As DNIe cannot handle other data length than 0x08 and 0x14, 
-	* perform consecutive reads of 8 bytes until retrieve requested length
-	*/
-	while (len > 0) {
-		size_t n = len > BUFFER_SIZE ? BUFFER_SIZE : len;
-		sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00);
-		apdu.le = BUFFER_SIZE;
-		apdu.resp = buf;
-		apdu.resplen = MAX_RESP_BUFFER_SIZE;	/* include SW's */
-		result = sc_transmit_apdu(card, &apdu);
-		if (result != SC_SUCCESS) {
-			LOG_TEST_RET(card->ctx, result, "APDU transmit failed");
-		}
-		if (apdu.resplen != BUFFER_SIZE) {
-			result = sc_check_sw(card, apdu.sw1, apdu.sw2);
-			goto dnie_get_challenge_error;
-		}
-		memcpy(rnd, apdu.resp, n);
-		len -= n;
-		rnd += n;
+	LOG_FUNC_CALLED(card->ctx);
+
+	r = iso_ops->get_challenge(card, rbuf, sizeof rbuf);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE cmd failed");
+
+	if (len < (size_t) r) {
+		out_len = len;
+	} else {
+		out_len = (size_t) r;
 	}
-	result = SC_SUCCESS;
- dnie_get_challenge_error:
-	LOG_FUNC_RETURN(card->ctx, result);
+	memcpy(rnd, rbuf, out_len);
+
+	LOG_FUNC_RETURN(card->ctx, (int) out_len);
 }
 
 /*

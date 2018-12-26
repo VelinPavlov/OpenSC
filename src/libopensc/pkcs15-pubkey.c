@@ -726,9 +726,6 @@ sc_pkcs15_decode_pubkey_ec(sc_context_t *ctx,
 	if (*ecpoint_data != 0x04)
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Supported only uncompressed EC pointQ value");
 
-	sc_log(ctx, "decode-EC key=%p, buf=%p, buflen=%"SC_FORMAT_LEN_SIZE_T"u",
-	       key, buf, buflen);
-
 	key->ecpointQ.len = ecpoint_len;
 	key->ecpointQ.value = ecpoint_data;
 
@@ -747,19 +744,13 @@ sc_pkcs15_encode_pubkey_ec(sc_context_t *ctx, struct sc_pkcs15_pubkey_ec *key,
 		u8 **buf, size_t *buflen)
 {
 	struct sc_asn1_entry asn1_ec_pointQ[C_ASN1_EC_POINTQ_SIZE];
-	int r;
 
 	LOG_FUNC_CALLED(ctx);
 	sc_copy_asn1_entry(c_asn1_ec_pointQ, asn1_ec_pointQ);
 	sc_format_asn1_entry(asn1_ec_pointQ + 0, key->ecpointQ.value, &key->ecpointQ.len, 1);
 
-	r = sc_asn1_encode(ctx, asn1_ec_pointQ, buf, buflen);
-	LOG_TEST_RET(ctx, r, "ASN.1 encoding failed");
-
-	sc_log(ctx,
-	       "EC key->ecpointQ=%p:%"SC_FORMAT_LEN_SIZE_T"u *buf=%p:%"SC_FORMAT_LEN_SIZE_T"u",
-	       key->ecpointQ.value, key->ecpointQ.len, *buf, *buflen);
-	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+	LOG_FUNC_RETURN(ctx,
+			sc_asn1_encode(ctx, asn1_ec_pointQ, buf, buflen));
 }
 
 
@@ -1490,6 +1481,8 @@ static struct ec_curve_info {
 		{"brainpoolP224r1",	"1.3.36.3.3.2.8.1.1.5", "06092B2403030208010105", 224},
 		{"brainpoolP256r1",	"1.3.36.3.3.2.8.1.1.7", "06092B2403030208010107", 256},
 		{"brainpoolP320r1",	"1.3.36.3.3.2.8.1.1.9", "06092B2403030208010109", 320},
+		{"brainpoolP384r1",	"1.3.36.3.3.2.8.1.1.11", "06092B240303020801010B", 384},
+		{"brainpoolP512r1",	"1.3.36.3.3.2.8.1.1.13", "06092B240303020801010D", 512},
 
 		{"secp192k1",		"1.3.132.0.31", "06052B8104001F", 192},
 		{"secp256k1",		"1.3.132.0.10", "06052B8104000A", 256},

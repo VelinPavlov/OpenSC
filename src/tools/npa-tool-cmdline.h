@@ -39,11 +39,11 @@ struct gengetopt_args_info
 {
   const char *help_help; /**< @brief Print help and exit help description.  */
   const char *version_help; /**< @brief Print version and exit help description.  */
-  int reader_arg;	/**< @brief Number of the PC/SC reader to use (-1 for autodetect) (default='-1').  */
-  char * reader_orig;	/**< @brief Number of the PC/SC reader to use (-1 for autodetect) original value given at command line.  */
-  const char *reader_help; /**< @brief Number of the PC/SC reader to use (-1 for autodetect) help description.  */
-  unsigned int verbose_min; /**< @brief Use (several times) to be more verbose's minimum occurrences */
-  unsigned int verbose_max; /**< @brief Use (several times) to be more verbose's maximum occurrences */
+  char * reader_arg;	/**< @brief Number of the reader to use. By default, the first reader with a present card is used. If the arguement is an ATR, the reader with a matching card will be chosen..  */
+  char * reader_orig;	/**< @brief Number of the reader to use. By default, the first reader with a present card is used. If the arguement is an ATR, the reader with a matching card will be chosen. original value given at command line.  */
+  const char *reader_help; /**< @brief Number of the reader to use. By default, the first reader with a present card is used. If the arguement is an ATR, the reader with a matching card will be chosen. help description.  */
+  unsigned int verbose_min; /**< @brief Use (several times) to be more verbose's minimum occurreces */
+  unsigned int verbose_max; /**< @brief Use (several times) to be more verbose's maximum occurreces */
   const char *verbose_help; /**< @brief Use (several times) to be more verbose help description.  */
   char * pin_arg;	/**< @brief Run PACE with (transport) eID-PIN.  */
   char * pin_orig;	/**< @brief Run PACE with (transport) eID-PIN original value given at command line.  */
@@ -68,8 +68,8 @@ struct gengetopt_args_info
   const char *unblock_help; /**< @brief Unblock PIN (uses PUK to activate three more retries) help description.  */
   char ** cv_certificate_arg;	/**< @brief Card Verifiable Certificate to create a certificate chain. Can be used multiple times (order is important)..  */
   char ** cv_certificate_orig;	/**< @brief Card Verifiable Certificate to create a certificate chain. Can be used multiple times (order is important). original value given at command line.  */
-  unsigned int cv_certificate_min; /**< @brief Card Verifiable Certificate to create a certificate chain. Can be used multiple times (order is important).'s minimum occurrences */
-  unsigned int cv_certificate_max; /**< @brief Card Verifiable Certificate to create a certificate chain. Can be used multiple times (order is important).'s maximum occurrences */
+  unsigned int cv_certificate_min; /**< @brief Card Verifiable Certificate to create a certificate chain. Can be used multiple times (order is important).'s minimum occurreces */
+  unsigned int cv_certificate_max; /**< @brief Card Verifiable Certificate to create a certificate chain. Can be used multiple times (order is important).'s maximum occurreces */
   const char *cv_certificate_help; /**< @brief Card Verifiable Certificate to create a certificate chain. Can be used multiple times (order is important). help description.  */
   char * cert_desc_arg;	/**< @brief Certificate description to show for Terminal Authentication.  */
   char * cert_desc_orig;	/**< @brief Certificate description to show for Terminal Authentication original value given at command line.  */

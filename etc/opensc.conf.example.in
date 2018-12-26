@@ -21,31 +21,13 @@ app default {
 	#
 	# debug_file = @DEBUG_FILE@
 
-	# Reopen debug file at the every debug message.
-	#
-	# For Windows it's forced to 'true'. The reason is that
-	#   in Windows file handles can not be shared between DLL-s,
-	#   each DLL has a separate file handle table.
-	#
-	# Default: false
-	# reopen_debug_file = true;
-
 	# PKCS#15 initialization / personalization
 	# profiles directory for pkcs15-init.
 	# Default: @PROFILE_DIR_DEFAULT@
 	#
 	# profile_dir = @PROFILE_DIR@;
 
-	# Paranoid memory allocation.
-	#
-	# If set to 'true', then refuse to continue when locking of non-pageable
-	# memory fails. This can cause subtle failures but is more secure when
-	# you have a swap disk.
-	# Default: false
-	#
-	# paranoid_memory = false;
-
-	# Dsiable pop-ups of built-in GUI
+	# Disable pop-ups of built-in GUI
 	#
 	# Default: false
 	# disable_popups = true;
@@ -55,6 +37,14 @@ app default {
 	#
 	# Default: false
 	# enable_default_driver = true;
+
+	# List of readers to ignore
+	# If any of the strings listed below is matched in a reader name (case
+	# sensitive, partial matching possible), the reader is ignored by OpenSC.
+	# Use `opensc-tool --list-readers` to see all currently connected readers.
+	#
+	# Default: empty
+	# ignored_readers = "CardMan 1021", "SPR 532";
 
 	# CT-API module configuration.
 	reader_driver ctapi {
@@ -102,6 +92,12 @@ app default {
 		# Enable pinpad if detected (PC/SC v2.0.2 Part 10)
 		# Default: true
 		# enable_pinpad = false;
+		#
+		# Some pinpad readers can only handle one exact length of the PIN.
+		# fixed_pinlength sets this value so that OpenSC expands the padding to
+		# this length.
+		# Default: 0 (i.e. not fixed)
+		# fixed_pinlength = 6;
 		#
 		# Detect reader capabilities with escape commands (wrapped APDUs with
 		# CLA=0xFF as defined by PC/SC pt. 3 and BSI TR-03119, e.g. for getting
@@ -188,15 +184,6 @@ app default {
 		#st_key = ZZSTTERM00001.pkcs8;
 	}
 
-	# Force using specific card driver
-	#
-	# If this option is present, OpenSC will use the supplied
-	# driver with all inserted cards.
-	#
-	# Default: autodetect
-	#
-	# force_card_driver = customcos;
-
 	# Configuration block for DNIe
 	#
 	# Card DNIe has an option to show an extra warning before
@@ -276,10 +263,6 @@ app default {
 		#
 		# flags = "rng", "keep_alive", "0x80000000";
 
-		# Enable pkcs11 initialization.
-		# Default: no
-		# pkcs11_enable_InitToken = yes;
-
 		#
 		# Context: PKCS#15 emulation layer
 		#
@@ -299,10 +282,10 @@ app default {
 
 		# Context: minidriver
 		#
-		# md_read_only: Mark card as read/only card in Minidriver/BaseCSP interface (Default: false)
+		# read_only: Mark card as read/only card in Minidriver/BaseCSP interface (Default: false)
 		# md_supports_X509_enrollment: Indicate X509 enrollment support at Minidriver/BaseCSP interface (Default: false)
-		# md_guid_as_id: Use the GUID generated for the key as id in the PKCS#15 structure (Default: false - auto generated)
-		# md_guid_as_label: Use the GUID generated for the key as label in the PKCS#15 structure (Default: false - no label set)
+		# md_guid_as_id: Use the GUID generated for the key as id in the PKCS#15 structure (Default: false, i.e. auto generated)
+		# md_guid_as_label: Use the GUID generated for the key as label in the PKCS#15 structure (Default: false, i.e. no label set)
 		# md_supports_container_key_gen: Card allows generating key pairs on the card (Default: false)
 		# md_supports_container_key_import: Card allows importing private keys (Default: false)
 		#
@@ -330,20 +313,17 @@ app default {
 		# Default: "Please enter your PIN to unblock the user PIN on the PINPAD."
 		# md_pinpad_dlg_content_admin = "Content Admin";
 		#
-		# Content of the PIN pad dialog after pressing "Cancel", when the reader doesn't respond to SCardCancel
-		# md_pinpad_dlg_content_cancel = "Content Cancel";
-		#
 		# Expanded information of the PIN pad dialog
 		# Default: "This window will be closed automatically after the PIN has been submitted on the PINPAD (timeout typically after 30 seconds)."
 		# md_pinpad_dlg_expanded = "Expanded Information";
 		#
-		# Expanded information of the PIN pad dialog after pressing "Cancel", when the reader doesn't respond to SCardCancel
-		# Default: "Some readers only support canceling the operation on the PIN pad. Press Cancel or remove the card."
-		# md_pinpad_dlg_expanded_cancel = "Expanded Information Cancel";
-		#
-		# Allow the user to cancel the PIN pad dialog
+		# Allow the user to cancel the PIN pad dialog by not immediately requesting the PIN on the PIN pad
 		# Default: false
 		# md_pinpad_dlg_enable_cancel = true;
+		#
+		# Content of the verification of the PIN pad dialog
+		# Default: "Automatically request PIN immediately on PIN-Pad"
+		# md_pinpad_dlg_verification = "Verification";
 		#
 		# Time in seconds for the progress bar of the PIN pad dialog to tick. "0" removes the progress bar.
 		# Default: 30
@@ -399,19 +379,6 @@ app default {
 		flags = "keep_alive";
 	}
 
-	# Micardo driver sometimes only play together with T=0
-	# In theory only the 'cold' ATR should be specified, as T=0 will
-	# be the preferred protocol once you boot it up with T=0, but be
-	# paranoid.
-	#
-	# D-Trust cards are also based on micardo and need T=0 for some reason
-	card_atr 3b:ff:94:00:ff:80:b1:fe:45:1f:03:00:68:d2:76:00:00:28:ff:05:1e:31:80:00:90:00:23 {
-		force_protocol = t0;
-	}
-	card_atr 3b:ff:11:00:ff:80:b1:fe:45:1f:03:00:68:d2:76:00:00:28:ff:05:1e:31:80:00:90:00:a6 {
-		force_protocol = t0;
-	}
-
 	# Oberthur's AuthentIC v3.2.2
 	card_atr 3B:DD:18:00:81:31:FE:45:80:F9:A0:00:00:00:77:01:00:70:0A:90:00:8B {
 		type = 11100;
@@ -429,7 +396,7 @@ app default {
 		name = "Gemalto MultiApp IAS/ECC v1.0.1";
 		secure_messaging = local_gemalto_iam;
 		# secure_messaging = local_adele;
-		md_read_only = false;
+		read_only = false;
 		md_supports_X509_enrollment = true;
 	}
 	card_atr 3B:7F:96:00:00:00:31:B8:64:40:70:14:10:73:94:01:80:82:90:00 {
@@ -437,7 +404,7 @@ app default {
 		driver = "iasecc";
 		name = "Gemalto MultiApp IAS/ECC v1.0.1";
 		secure_messaging = local_gemalto_iam;
-		md_read_only = false;
+		read_only = false;
 		md_supports_X509_enrollment = true;
 	}
 	#card_atr 3B:DD:18:00:81:31:FE:45:80:F9:A0:00:00:00:77:01:08:00:07:90:00:FE {
@@ -456,7 +423,7 @@ app default {
 	#	type = 25005;
 	#	driver = "iasecc";
 	#	name = "Morpho MI IAS/ECC v1.0.1";
-	#	md_read_only = false;
+	#	read_only = false;
 	#	md_supports_X509_enrollment = true;
 	#	secure_messaging = local_morpho_mi;
 	#}
@@ -464,7 +431,7 @@ app default {
 		type = 25004;
 		driver = "iasecc";
 		name = "Amos IAS/ECC v1.0.1";
-		md_read_only = false;
+		read_only = false;
 		md_supports_X509_enrollment = true;
 		secure_messaging = local_amos;
 	}
@@ -472,7 +439,7 @@ app default {
 		type = 25004;
 		driver = "iasecc";
 		name = "Amos IAS/ECC v1.0.1";
-		md_read_only = false;
+		read_only = false;
 		md_supports_X509_enrollment = true;
 		secure_messaging = local_amos_eid;
 	}
@@ -480,7 +447,7 @@ app default {
 	# SmartCard-HSM with contact-based interface or USB-Stick
 	card_atr 3B:FE:18:00:00:81:31:FE:45:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:FA {
 		driver = "sc-hsm";
-		md_read_only = false;
+		read_only = false;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -489,7 +456,7 @@ app default {
 	# SmartCard-HSM with contact-less interface
 	card_atr 3B:8E:80:01:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:18 {
 		driver = "sc-hsm";
-		md_read_only = false;
+		read_only = false;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -498,7 +465,7 @@ app default {
 	# SmartCard-HSM with fingerprint sensor and PIN pad
 	card_atr 3B:80:80:01:01 {
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -507,8 +474,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -524,7 +489,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -533,8 +498,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -549,7 +512,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -558,8 +521,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -574,7 +535,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -583,8 +544,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -599,7 +558,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -608,8 +567,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -624,7 +581,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -633,8 +590,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -649,7 +604,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -658,8 +613,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -674,7 +627,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -683,8 +636,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -699,7 +650,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -708,8 +659,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -724,7 +673,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -733,8 +682,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -750,7 +697,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -759,8 +706,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -776,7 +721,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -785,8 +730,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -802,7 +745,7 @@ app default {
 		atrmask = "FF:FF:FF:FF:FF:FF:FF:FF:00:00:00:00:00:00:00:00:00:00:00:00";
 		driver = "sc-hsm";
 		force_protocol = "t1";
-		md_read_only = false;
+		read_only = true;
 		md_supports_X509_enrollment = true;
 		md_supports_container_key_gen = true;
 		md_guid_as_label = true;
@@ -811,8 +754,6 @@ app default {
 		md_pinpad_dlg_content_user_sign = "Bitte verifizieren Sie Ihren Fingarabdruck oder Ihre PIN für die digitale Signatur auf der Karte.";
 		md_pinpad_dlg_content_admin = "Bitte geben Sie Ihre PIN zum Entsperren der Nutzer-PIN auf dem PIN-Pad ein.";
 		md_pinpad_dlg_expanded = "Dieses Fenster wird automatisch geschlossen, wenn die PIN oder der Fingerabdruck verifiziert wurde (Timeout nach 30 Sekunden). Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen.";
-		md_pinpad_dlg_expanded_cancel = "Die Karte unterstützt das Abbrechen ausschließlich am PIN-Pad. Nutzen Sie das PIN-Pad, um die Eingabe abzubrechen oder entfernen Sie die Karte.";
-		md_pinpad_dlg_allow_cancel = false;
 		md_pinpad_dlg_timeout = 30;
 		notify_card_inserted = "GoID erkannt";
 		notify_card_inserted_text = "";
@@ -827,8 +768,8 @@ app default {
 		# name of external SM module
 		# module_name = @DEFAULT_SM_MODULE@;
 		# directory with external SM module
-		# Default: defined by windows register
-		@DEFAULT_SM_MODULE_PATH@
+		# Default: @DEFAULT_SM_MODULE_PATH@
+		# module_path = @DEFAULT_SM_MODULE_PATH@;
 
 		# specific data to tune the module initialization
 		# module_data = "Here can be your SM module init data";
@@ -851,7 +792,7 @@ app default {
 
 	secure_messaging local_gemalto_iam  {
 		module_name = @DEFAULT_SM_MODULE@;
-		@DEFAULT_SM_MODULE_PATH@
+		# module_path = @DEFAULT_SM_MODULE_PATH@;
 		# module_data = "";
 		type = acl;	     # transmit, acl
 
@@ -870,7 +811,7 @@ app default {
 
 	secure_messaging local_amos  {
 		module_name = @DEFAULT_SM_MODULE@;
-		@DEFAULT_SM_MODULE_PATH@
+		# module_path = @DEFAULT_SM_MODULE_PATH@;
 		# module_data = "";
 		mode = acl;
 		ifd_serial = "11:22:33:44:55:66:77:88";
@@ -880,7 +821,7 @@ app default {
 
 	secure_messaging local_amos_eid  {
 		module_name = @DEFAULT_SM_MODULE@;
-		@DEFAULT_SM_MODULE_PATH@
+		# module_path = @DEFAULT_SM_MODULE_PATH@;
 		# module_data = "";
 		mode = acl;
 		ifd_serial = "11:22:33:44:55:66:77:88";
@@ -890,7 +831,7 @@ app default {
 
 	secure_messaging local_adele  {
 		module_name = @DEFAULT_SM_MODULE@;
-		@DEFAULT_SM_MODULE_PATH@
+		# module_path = @DEFAULT_SM_MODULE_PATH@;
 		# module_data = "";
 		type = acl;	     # transmit, acl
 
@@ -920,11 +861,10 @@ app default {
 		# Whether to use the cache files in the user's
 		# home directory.
 		#
-		# At the moment you have to 'teach' the card
-		# to the system by running command: pkcs15-tool -L
+		# Note: If caching is done by a system process, caching may be placed
+		# inaccessible from the user account. Use a global caching directory if
+		# you wish to share the cached information.
 		#
-		# WARNING: Caching shouldn't be used in setuid root
-		# applications.
 		# Default: false
 		# use_file_caching = true;
 		#
@@ -978,6 +918,10 @@ app default {
 			# module = @LIBDIR@@LIB_PRE@p15emu_custom@DYN_LIB_EXT@;
 		# }
 
+		# Enable initialization and card recognition in PKCS#11 layer.
+		# Default: no
+		# pkcs11_enable_InitToken = yes;
+
 		# some additional application parameters:
 		# - type (generic, protected) used to distinguish the common access application
 		#   and application for which authentication to perform some operation cannot be
@@ -1027,15 +971,6 @@ app opensc-pkcs11 {
 
 		# (max_virtual_slots/slots_per_card) limits the number of readers
 		# that can be used on the system. Default is then 16/4=4 readers.
-
-		# Normally, the pkcs11 module will create
-		# the full number of slots defined above by
-		# num_slots. If there are fewer pins/keys on
-		# the card, the remaining keys will be empty
-		# (and you will be able to create new objects
-		# within them).
-		# Default: true
-		# hide_empty_tokens = false;
 
 		# By default, the OpenSC PKCS#11 module will not lock your card
 		# once you authenticate to the card via C_Login.
@@ -1119,21 +1054,6 @@ app opensc-pkcs11 {
 		#
 		# Default: false
 		# create_puk_slot = true;
-
-		# Report as 'zero' the CKA_ID attribute of CA certificate
-		# For the unknown reason the middleware of the manufacturer of gemalto (axalto, gemplus)
-		# card reports as '0' the CKA_ID of CA cartificates.
-		# Maybe someone else will need it. (Would be nice to know who and what for -- VTA)
-		#
-		# Default: false
-		# zero_ckaid_for_ca_certs = true;
-
-		# List of readers to ignore
-		# If any of the strings listed below is matched (case sensitive) in a reader name,
-		# the reader is ignored by the PKCS#11 module.
-		#
-		# Default: empty
-		# ignored_readers = "CardMan 1021", "SPR 532";
 
 		# Symbolic names of PINs for which slots are created
 		# Card can contain more then one PINs or more then one on-card application with

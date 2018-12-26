@@ -155,21 +155,6 @@ CK_RV initialize_reader(sc_reader_t *reader)
 	unsigned int i;
 	CK_RV rv;
 
-	scconf_block *conf_block = NULL;
-	const scconf_list *list = NULL;
-
-	conf_block = sc_get_conf_block(context, "pkcs11", NULL, 1);
-	if (conf_block != NULL) {
-		list = scconf_find_list(conf_block, "ignored_readers");
-		while (list != NULL) {
-			if (strstr(reader->name, list->data) != NULL) {
-				sc_log(context, "Ignoring reader \'%s\' because of \'%s\'\n", reader->name, list->data);
-				return CKR_OK;
-			}
-			list = list->next;
-		}
-	}
-
 	for (i = 0; i < sc_pkcs11_conf.slots_per_card; i++) {
 		rv = create_slot(reader);
 		if (rv != CKR_OK)
@@ -225,6 +210,7 @@ CK_RV card_removed(sc_reader_t * reader)
 CK_RV card_detect(sc_reader_t *reader)
 {
 	struct sc_pkcs11_card *p11card = NULL;
+	int free_p11card = 0;
 	int rc;
 	CK_RV rv;
 	unsigned int i;
@@ -271,15 +257,17 @@ again:
 		p11card = (struct sc_pkcs11_card *)calloc(1, sizeof(struct sc_pkcs11_card));
 		if (!p11card)
 			return CKR_HOST_MEMORY;
+		free_p11card = 1;
 		p11card->reader = reader;
 	}
 
 	if (p11card->card == NULL) {
 		sc_log(context, "%s: Connecting ... ", reader->name);
 		rc = sc_connect_card(reader, &p11card->card);
-		if (rc != SC_SUCCESS)   {
+		if (rc != SC_SUCCESS) {
 			sc_log(context, "%s: SC connect card error %i", reader->name, rc);
-			return sc_to_cryptoki_error(rc, NULL);
+			rv = sc_to_cryptoki_error(rc, NULL);
+			goto fail;
 		}
 
 		/* escape commands are only guaranteed to be working with a card
@@ -308,8 +296,10 @@ again:
 			if (frameworks[i]->bind != NULL)
 				break;
 		/*TODO: only first framework is used: pkcs15init framework is not reachable here */
-		if (frameworks[i] == NULL)
-			return CKR_GENERAL_ERROR;
+		if (frameworks[i] == NULL) {
+			rv = CKR_GENERAL_ERROR;
+			goto fail;
+		}
 
 		p11card->framework = frameworks[i];
 
@@ -317,12 +307,17 @@ again:
 		sc_log(context, "%s: Detected framework %d. Creating tokens.", reader->name, i);
 		/* Bind 'generic' application or (emulated?) card without applications */
 		if (app_generic || !p11card->card->app_count)   {
-			scconf_block *atrblock = NULL;
+			scconf_block *conf_block = NULL;
 			int enable_InitToken = 0;
 
-			atrblock = sc_match_atr_block(p11card->card->ctx, NULL, &p11card->reader->atr);
-			if (atrblock)
-				enable_InitToken = scconf_get_bool(atrblock, "pkcs11_enable_InitToken", 0);
+			conf_block = sc_match_atr_block(p11card->card->ctx, NULL,
+				&p11card->reader->atr);
+			if (!conf_block) /* check default block */
+				conf_block = sc_get_conf_block(context,
+					"framework", "pkcs15", 1);
+
+			enable_InitToken = scconf_get_bool(conf_block,
+				"pkcs11_enable_InitToken", 0);
 
 			sc_log(context, "%s: Try to bind 'generic' token.", reader->name);
 			rv = frameworks[i]->bind(p11card, app_generic);
@@ -334,7 +329,7 @@ again:
 				sc_log(context,
 				       "%s: cannot bind 'generic' token: rv 0x%lX",
 				       reader->name, rv);
-				return rv;
+				goto fail;
 			}
 
 			sc_log(context, "%s: Creating 'generic' token.", reader->name);
@@ -343,7 +338,7 @@ again:
 				sc_log(context,
 				       "%s: create 'generic' token error 0x%lX",
 				       reader->name, rv);
-				return rv;
+				goto fail;
 			}
 		}
 
@@ -369,13 +364,24 @@ again:
 				sc_log(context,
 				       "%s: create %s token error 0x%lX",
 				       reader->name, app_name, rv);
-				return rv;
+				goto fail;
 			}
 		}
 	}
 
 	sc_log(context, "%s: Detection ended", reader->name);
 	return CKR_OK;
+
+fail:
+	if (free_p11card) {
+		if (p11card->framework)
+			p11card->framework->unbind(p11card);
+		if (p11card->card != NULL)
+			sc_disconnect_card(p11card->card);
+		free(p11card);
+	}
+
+	return rv;
 }
 
 
@@ -441,7 +447,7 @@ CK_RV slot_get_slot(CK_SLOT_ID id, struct sc_pkcs11_slot ** slot)
 
 CK_RV slot_get_token(CK_SLOT_ID id, struct sc_pkcs11_slot ** slot)
 {
-	int rv;
+	CK_RV rv;
 
 	sc_log(context, "Slot(id=0x%lX): get token", id);
 	rv = slot_get_slot(id, slot);
@@ -467,7 +473,8 @@ CK_RV slot_get_token(CK_SLOT_ID id, struct sc_pkcs11_slot ** slot)
 
 CK_RV slot_token_removed(CK_SLOT_ID id)
 {
-	int rv, token_was_present;
+    CK_RV rv;
+	int token_was_present;
 	struct sc_pkcs11_slot *slot;
 	struct sc_pkcs11_object *object;
 

@@ -4,7 +4,7 @@ TARGET                  = opensc.dll opensc_a.lib
 OBJECTS			= \
 	sc.obj ctx.obj log.obj errors.obj \
 	asn1.obj base64.obj sec.obj card.obj iso7816.obj dir.obj ef-atr.obj \
-	ef-gdo.obj padding.obj apdu.obj simpletlv.obj \
+	ef-gdo.obj padding.obj apdu.obj simpletlv.obj gp.obj \
 	\
 	pkcs15.obj pkcs15-cert.obj pkcs15-data.obj pkcs15-pin.obj \
 	pkcs15-prkey.obj pkcs15-pubkey.obj pkcs15-skey.obj \
@@ -19,7 +19,8 @@ OBJECTS			= \
 	card-mcrd.obj card-starcos.obj card-openpgp.obj card-jcop.obj \
 	card-oberthur.obj card-belpic.obj card-atrust-acos.obj \
 	card-entersafe.obj card-epass2003.obj card-coolkey.obj \
-	card-incrypto34.obj card-cac.obj card-piv.obj card-muscle.obj \
+	card-incrypto34.obj card-cac.obj card-cac1.obj card-cac-common.obj \
+	card-piv.obj card-muscle.obj \
 	card-acos5.obj \
 	card-asepcos.obj card-akis.obj card-gemsafeV1.obj card-rutoken.obj \
 	card-rtecp.obj card-westcos.obj card-myeid.obj \

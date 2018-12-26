@@ -80,7 +80,7 @@ struct authentic_private_data {
 	struct sc_cplc cplc;
 };
 
-static struct sc_atr_table authentic_known_atrs[] = {
+static const struct sc_atr_table authentic_known_atrs[] = {
 	{ "3B:DD:18:00:81:31:FE:45:80:F9:A0:00:00:00:77:01:00:70:0A:90:00:8B", NULL,
 		"Oberthur AuthentIC 3.2.2", SC_CARD_TYPE_OBERTHUR_AUTHENTIC_3_2,  0, NULL },
 	{ NULL, NULL, NULL, 0, 0, NULL }
@@ -463,7 +463,7 @@ static int
 authentic_init(struct sc_card *card)
 {
 	struct sc_context *ctx = card->ctx;
-	int ii, rv = SC_ERROR_NO_CARD_SUPPORT;
+	int ii, rv = SC_ERROR_INVALID_CARD;
 
 	LOG_FUNC_CALLED(ctx);
 	for(ii=0;authentic_known_atrs[ii].atr;ii++)   {
@@ -475,7 +475,7 @@ authentic_init(struct sc_card *card)
 	}
 
 	if (!authentic_known_atrs[ii].atr)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_NO_CARD_SUPPORT);
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_CARD);
 
 	card->cla  = 0x00;
 	card->drv_data = (struct authentic_private_data *) calloc(sizeof(struct authentic_private_data), 1);
@@ -485,8 +485,11 @@ authentic_init(struct sc_card *card)
 	if (card->type == SC_CARD_TYPE_OBERTHUR_AUTHENTIC_3_2)
 		rv = authentic_init_oberthur_authentic_3_2(card);
 
-	if (!rv)
+	if (rv != SC_SUCCESS)
 		rv = authentic_get_serialnr(card, NULL);
+
+	if (rv != SC_SUCCESS)
+		rv = SC_ERROR_INVALID_CARD;
 
 	LOG_FUNC_RETURN(ctx, rv);
 }
@@ -557,6 +560,9 @@ authentic_set_current_files(struct sc_card *card, struct sc_path *path,
 			sc_file_dup(&card->cache.current_df, file);
 
 			if (cur_df_path.len)   {
+				if (cur_df_path.len + card->cache.current_df->path.len > sizeof card->cache.current_df->path.value
+						|| cur_df_path.len > sizeof card->cache.current_df->path.value)
+					LOG_FUNC_RETURN(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED);
 				memcpy(card->cache.current_df->path.value + cur_df_path.len,
 						card->cache.current_df->path.value,
 						card->cache.current_df->path.len);
@@ -985,7 +991,7 @@ authentic_process_fci(struct sc_card *card, struct sc_file *file,
 	}
 
 	sc_log_hex(ctx, "ACL data", file->sec_attr, file->sec_attr_len);
-	for (ii = 0; ii < file->sec_attr_len / 2; ii++)  {
+	for (ii = 0; ii < file->sec_attr_len / 2 && ii < sizeof ops_DF; ii++)  {
 		unsigned char op = file->type == SC_FILE_TYPE_DF ? ops_DF[ii] : ops_EF[ii];
 		unsigned char acl = *(file->sec_attr + ii*2);
 		unsigned char cred_id = *(file->sec_attr + ii*2 + 1);
@@ -1661,40 +1667,27 @@ authentic_get_serialnr(struct sc_card *card, struct sc_serial_number *serial)
 }
 
 
-/* 'GET CHALLENGE' returns always 24 bytes */
 static int
 authentic_get_challenge(struct sc_card *card, unsigned char *rnd, size_t len)
 {
-	struct sc_context *ctx = card->ctx;
-	struct sc_apdu apdu;
+	/* 'GET CHALLENGE' returns always 24 bytes */
 	unsigned char rbuf[0x18];
-	int rv, nn;
+	size_t out_len;
+	int r;
 
-	LOG_FUNC_CALLED(ctx);
-	if (!rnd && len)
-		return SC_ERROR_INVALID_ARGUMENTS;
+	LOG_FUNC_CALLED(card->ctx);
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x84, 0x00, 0x00);
-	apdu.resp = rbuf;
-	apdu.resplen = sizeof(rbuf);
-	apdu.le = sizeof(rbuf);
+	r = iso_ops->get_challenge(card, rbuf, sizeof rbuf);
+	LOG_TEST_RET(card->ctx, r, "GET CHALLENGE cmd failed");
 
-	while (len > 0) {
-		rv = sc_transmit_apdu(card, &apdu);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, rv, "APDU transmit failed");
-		rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
-		LOG_TEST_RET(ctx, rv, "PIN cmd failed");
-
-		if (apdu.resplen != sizeof(rbuf))
-			return sc_check_sw(card, apdu.sw1, apdu.sw2);
-
-		nn = len > apdu.resplen ? apdu.resplen : len;
-		memcpy(rnd, apdu.resp, nn);
-		len -= nn;
-		rnd += nn;
+	if (len < (size_t) r) {
+		out_len = len;
+	} else {
+		out_len = (size_t) r;
 	}
+	memcpy(rnd, rbuf, out_len);
 
-	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+	LOG_FUNC_RETURN(card->ctx, out_len);
 }
 
 
@@ -1874,7 +1867,7 @@ authentic_manage_sdo_generate(struct sc_card *card, struct sc_authentic_sdo *sdo
 	LOG_TEST_RET(ctx, rv, "authentic_sdo_create() SDO put data error");
 
 	rv = authentic_decode_pubkey_rsa(ctx, apdu.resp, apdu.resplen, &sdo->data.prvkey);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, rv, "cannot decode public key");
+	LOG_TEST_RET(card->ctx, rv, "cannot decode public key");
 
 	free(data);
 	LOG_FUNC_RETURN(ctx, rv);

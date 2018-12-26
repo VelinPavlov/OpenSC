@@ -37,6 +37,7 @@
 
 #include <windows.h>
 #include <Commctrl.h>
+#include <timeapi.h>
 #include "cardmod.h"
 
 #include "common/compat_strlcpy.h"
@@ -47,6 +48,7 @@
 #include "libopensc/log.h"
 #include "libopensc/internal.h"
 #include "libopensc/aux-data.h"
+#include "libopensc/sc-ossl-compat.h"
 #include "ui/notify.h"
 #include "ui/strings.h"
 #include "ui/wchar_from_char_str.h"
@@ -57,6 +59,10 @@
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
 #include <openssl/pem.h>
 #endif
+#endif
+
+#ifdef ENABLE_OPENPACE
+#include <eac/eac.h>
 #endif
 
 #if defined(__MINGW32__)
@@ -121,6 +127,8 @@ HINSTANCE g_inst;
 
  /* defined twice: in versioninfo-minidriver.rc.in and in minidriver.c */
 #define IDI_SMARTCARD   102
+
+#define SUBKEY_ENABLE_CANCEL "Software\\OpenSC Project\\OpenSC\\md_pinpad_dlg_enable_cancel"
 
 /* magic to determine previous pinpad authentication */
 #define MAGIC_SESSION_PIN "opensc-minidriver"
@@ -649,11 +657,30 @@ md_get_config_bool(PCARD_DATA pCardData, char *flag_name, BOOL ret_default)
 }
 
 
-/* 'Write' mode can be enabled from the OpenSC configuration file*/
+/* 'cancellation' mode can be enabled from the OpenSC configuration file*/
 static BOOL
 md_is_pinpad_dlg_enable_cancel(PCARD_DATA pCardData)
 {
+	TCHAR path[MAX_PATH]={0};
+
 	logprintf(pCardData, 2, "Is cancelling the PIN pad dialog enabled?\n");
+
+	if (GetModuleFileName(NULL, path, ARRAYSIZE(path))) {
+		DWORD enable_cancel;
+		size_t sz = sizeof enable_cancel;
+
+		if (SC_SUCCESS == sc_ctx_win32_get_config_value(NULL, path,
+					SUBKEY_ENABLE_CANCEL,
+					(char *)(&enable_cancel), &sz)) {
+			switch (enable_cancel) {
+				case 0:
+					return FALSE;
+				case 1:
+					return TRUE;
+			}
+		}
+	}
+
 	return md_get_config_bool(pCardData, "md_pinpad_dlg_enable_cancel", FALSE);
 }
 
@@ -662,8 +689,22 @@ md_is_pinpad_dlg_enable_cancel(PCARD_DATA pCardData)
 static BOOL
 md_is_read_only(PCARD_DATA pCardData)
 {
+	BOOL ret = TRUE;
+
 	logprintf(pCardData, 2, "Is read-only?\n");
-	return md_get_config_bool(pCardData, "md_read_only", TRUE);
+
+	if (pCardData && pCardData->pvVendorSpecific) {
+		VENDOR_SPECIFIC *vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
+		if (vs->p15card && vs->p15card->tokeninfo) {
+			if (vs->p15card->tokeninfo->flags & SC_PKCS15_TOKEN_READONLY) {
+				ret = TRUE;
+			} else {
+				ret = FALSE;
+			}
+		}
+	}
+
+	return md_get_config_bool(pCardData, "read_only", ret);
 }
 
 
@@ -2821,65 +2862,85 @@ static const char *md_get_ui_str(PCARD_DATA pCardData, enum ui_str id)
 static HRESULT CALLBACK md_dialog_proc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LONG_PTR dwRefData)
 {
 	LONG_PTR param;
-	int timeout;
 
 	UNREFERENCED_PARAMETER(lParam);
 	switch (message) {
 		case TDN_CREATED:
 			{
 				PCARD_DATA pCardData = (PCARD_DATA)((LONG_PTR*)dwRefData)[7];
+				DWORD now = timeGetTime();
+
 				/* remove the icon from the window title */
 				SendMessage(hWnd, WM_SETICON, (LPARAM) ICON_BIG, (LONG_PTR) NULL);
 				SendMessage(hWnd, WM_SETICON, (LPARAM) ICON_SMALL, (LONG_PTR) NULL);
+
+				/* store parameter like pCardData for further use if needed */
+				((LONG_PTR*)dwRefData)[11] = (LONG_PTR) now;
+				SetWindowLongPtr(hWnd, GWLP_USERDATA, dwRefData);
+				((LONG_PTR*)dwRefData)[10] = (LONG_PTR) hWnd;
+
 				if (!md_is_pinpad_dlg_enable_cancel(pCardData)) {
+					int timeout = md_get_pinpad_dlg_timeout(pCardData);
+					if (timeout > 0) {
+						SendMessage(hWnd, TDM_SET_PROGRESS_BAR_RANGE, 0, MAKELPARAM(0, timeout*1000));
+					}
+
 					/* disable "Close" */
 					SendMessage(hWnd, TDM_ENABLE_BUTTON, IDCLOSE, 0);
+
+					/* launch the function in another thread context store the thread handle */
+					((LONG_PTR*)dwRefData)[9] = (LONG_PTR) CreateThread(NULL, 0, md_dialog_perform_pin_operation_thread, (LPVOID) dwRefData, 0, NULL);
+				} else {
+					int timeout = md_get_pinpad_dlg_timeout(pCardData);
+					if (timeout > 0) {
+						SendMessage(hWnd, TDM_SET_PROGRESS_BAR_RANGE, 0, 0);
+						SendMessage(hWnd, TDM_SET_PROGRESS_BAR_STATE, PBST_PAUSED, 0);
+					}
 				}
-				timeout = md_get_pinpad_dlg_timeout(pCardData);
-				if (timeout > 0) {
-					/* update the progress bar with the tick counter for the number of specified seconds */
-					SendMessage(hWnd, TDM_SET_PROGRESS_BAR_RANGE, 0, MAKELPARAM(0, timeout*1000));
-				}
-				/* store parameter like pCardData for further use if needed */
-				SetWindowLongPtr(hWnd, GWLP_USERDATA, dwRefData);
-				/* launch the function in another thread context store the thread handle */
-				((LONG_PTR*)dwRefData)[10] = (LONG_PTR) hWnd;
-				((LONG_PTR*)dwRefData)[9] = (LONG_PTR) CreateThread(NULL, 0, md_dialog_perform_pin_operation_thread, (LPVOID) dwRefData, 0, NULL);
 			}
 			return S_OK;
 
 		case TDN_TIMER:
-			/* tick down for 30 seconds */
-			SendMessage(hWnd, TDM_SET_PROGRESS_BAR_POS, 30000 - wParam, 0L);
+			SendMessage(hWnd, TDM_SET_PROGRESS_BAR_POS, wParam, 0L);
 			return S_OK;
 
 		case TDN_BUTTON_CLICKED:
-			/* We ignore anything else than the Cancel button */
-			if (LOWORD(wParam) != IDCANCEL)
-				return S_FALSE;
+			switch(LOWORD(wParam)) {
+				case IDCANCEL:
+					DestroyWindow(hWnd);
+					break;
 
-			param = GetWindowLongPtr(hWnd, GWLP_USERDATA);
-			if (param) {
-				PCARD_DATA pCardData = (PCARD_DATA)((LONG_PTR*)param)[7];
-				VENDOR_SPECIFIC* vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
-				WCHAR *pszContent = wchar_from_char_str(md_get_ui_str(pCardData,
-							MD_PINPAD_DLG_CONTENT_CANCEL));
-				WCHAR *pszExpandedInformation = wchar_from_char_str(md_get_ui_str(pCardData,
-							MD_PINPAD_DLG_EXPANDED_CANCEL));
+				case IDOK:
+					param = GetWindowLongPtr(hWnd, GWLP_USERDATA);
+					if (param) {
+						PCARD_DATA pCardData = (PCARD_DATA)((LONG_PTR*)param)[7];
+						VENDOR_SPECIFIC* vs = (VENDOR_SPECIFIC*) pCardData->pvVendorSpecific;
 
-				sc_cancel(vs->ctx);
+						int timeout = md_get_pinpad_dlg_timeout(pCardData);
+						if (timeout > 0) {
+							DWORD start = (DWORD)((LONG_PTR*)dwRefData)[11];
+							DWORD delta = timeGetTime() - start;
+							SendMessage(hWnd, TDM_SET_PROGRESS_BAR_RANGE, 0, MAKELPARAM(delta, delta + timeout*1000));
+							SendMessage(hWnd, TDM_SET_PROGRESS_BAR_STATE, PBST_NORMAL, 0);
+						}
 
-				SendMessage(hWnd, TDM_SET_ELEMENT_TEXT,
-						TDE_CONTENT, (LPARAM) pszContent);
-				SendMessage(hWnd, TDM_SET_ELEMENT_TEXT,
-						TDE_EXPANDED_INFORMATION, (LPARAM) pszExpandedInformation);
-				SendMessage(hWnd, TDM_UPDATE_ICON, TDIE_ICON_MAIN, (LPARAM)MAKEINTRESOURCE(TD_INFORMATION_ICON));
-				/* remove the icon from the window title */
-				SendMessage(hWnd, WM_SETICON, (LPARAM) ICON_BIG, (LONG_PTR) NULL);
-				SendMessage(hWnd, WM_SETICON, (LPARAM) ICON_SMALL, (LONG_PTR) NULL);
+						/* disable "OK" and "Cancel" */
+						SendMessage(hWnd, TDM_ENABLE_BUTTON, IDOK, 0);
+						SendMessage(hWnd, TDM_ENABLE_BUTTON, IDCANCEL, 0);
 
-				LocalFree(pszContent);
-				LocalFree(pszExpandedInformation);
+						/* disable "x" */
+						HMENU menu = GetSystemMenu(hWnd, FALSE);
+						if (menu) {
+							EnableMenuItem(menu, SC_CLOSE, MF_BYCOMMAND | MF_GRAYED);
+						}
+
+						/* launch the function in another thread context store the thread handle */
+						((LONG_PTR*)dwRefData)[9] = (LONG_PTR) CreateThread(NULL, 0, md_dialog_perform_pin_operation_thread, (LPVOID) dwRefData, 0, NULL);
+					}
+					break;
+
+				default:
+					return S_FALSE;
 			}
 			break;
 
@@ -2905,11 +2966,12 @@ md_dialog_perform_pin_operation(PCARD_DATA pCardData, int operation, struct sc_p
 		const u8 *pin1, size_t pin1len,
 		const u8 *pin2, size_t *pin2len, BOOL displayUI, DWORD role)
 {
-	LONG_PTR parameter[11];
+	LONG_PTR parameter[12];
 	INT_PTR result = 0;
 	HWND hWndDlg = 0;
 	TASKDIALOGCONFIG tc = {0};
 	int rv = 0;
+	BOOL checked, user_checked;
 	VENDOR_SPECIFIC* pv = (VENDOR_SPECIFIC*)(pCardData->pvVendorSpecific);
 
 	/* stack the parameters */
@@ -2924,6 +2986,7 @@ md_dialog_perform_pin_operation(PCARD_DATA pCardData, int operation, struct sc_p
 	parameter[8] = (LONG_PTR)role;
 	parameter[9] = 0; /* place holder for thread handle */
 	parameter[10] = 0; /* place holder for window handle */
+	parameter[11] = 0; /* place holder for end of timer */
 
 	/* launch the function to perform in the same thread context */
 	if (!displayUI) {
@@ -2947,6 +3010,8 @@ md_dialog_perform_pin_operation(PCARD_DATA pCardData, int operation, struct sc_p
 			MD_PINPAD_DLG_CONTROL_COLLAPSED));
 	tc.pszExpandedInformation = wchar_from_char_str(md_get_ui_str(pCardData,
 			MD_PINPAD_DLG_EXPANDED));
+	tc.pszVerificationText = wchar_from_char_str(md_get_ui_str(pCardData,
+			MD_PINPAD_DLG_VERIFICATION));
 	switch (role) {
 		case ROLE_ADMIN:
 			tc.pszContent = wchar_from_char_str(md_get_ui_str(pCardData,
@@ -2977,12 +3042,14 @@ md_dialog_perform_pin_operation(PCARD_DATA pCardData, int operation, struct sc_p
 		tc.dwFlags |= TDF_SHOW_PROGRESS_BAR | TDF_CALLBACK_TIMER;
 	}
 	
-	if (md_is_pinpad_dlg_enable_cancel(pCardData)) {
-		tc.dwFlags |= TDF_ALLOW_DIALOG_CANCELLATION;
-		tc.dwCommonButtons = TDCBF_CANCEL_BUTTON;
-	} else {
+	checked = !md_is_pinpad_dlg_enable_cancel(pCardData);
+	if (checked) {
+		tc.dwFlags |= TDF_VERIFICATION_FLAG_CHECKED;
 		/* can't use TDCBF_CANCEL_BUTTON since this would implicitly set TDF_ALLOW_DIALOG_CANCELLATION */
 		tc.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+	} else {
+		tc.dwFlags |= TDF_ALLOW_DIALOG_CANCELLATION;
+		tc.dwCommonButtons = TDCBF_CANCEL_BUTTON | TDCBF_OK_BUTTON;
 	}
 
 	tc.hMainIcon = md_get_pinpad_dlg_icon(pCardData);
@@ -2995,7 +3062,30 @@ md_dialog_perform_pin_operation(PCARD_DATA pCardData, int operation, struct sc_p
 	tc.lpCallbackData = (LONG_PTR)parameter;
 	tc.cbSize = sizeof(tc);
 
-	result = TaskDialogIndirect(&tc, NULL, NULL, NULL);
+	result = TaskDialogIndirect(&tc, NULL, NULL, &user_checked);
+
+	if (user_checked != checked) {
+		TCHAR path[MAX_PATH]={0};
+		if (GetModuleFileName(NULL, path, ARRAYSIZE(path))) {
+			HKEY hKey;
+			LSTATUS lstatus = RegOpenKeyExA(HKEY_CURRENT_USER,
+					SUBKEY_ENABLE_CANCEL, 0, KEY_WRITE, &hKey);
+			if (ERROR_SUCCESS != lstatus) {
+				lstatus = RegCreateKeyExA(HKEY_CURRENT_USER,
+						SUBKEY_ENABLE_CANCEL, 0, NULL, REG_OPTION_NON_VOLATILE,
+						KEY_WRITE, NULL, &hKey, NULL);
+			}
+			if (ERROR_SUCCESS == lstatus) {
+				DWORD enable_cancel = 0;
+				if (user_checked == FALSE) {
+					enable_cancel = 1;
+				}
+				lstatus = RegSetValueEx(hKey, path, 0, REG_DWORD,
+						(const BYTE*)&enable_cancel, sizeof(enable_cancel));
+				RegCloseKey(hKey);
+			}
+		}
+	}
 
 	LocalFree((WCHAR *) tc.pszWindowTitle);
 	LocalFree((WCHAR *) tc.pszMainInstruction);
@@ -3665,7 +3755,7 @@ DWORD WINAPI CardGetChallenge(__in PCARD_DATA pCardData,
 	}
 
 	rv = sc_get_challenge(vs->p15card->card, *ppbChallengeData, 8);
-	if (rv)   {
+	if (rv < 0) {
 		logprintf(pCardData, 1, "Get challenge failed: %s\n", sc_strerror(rv));
 		pCardData->pfnCspFree(*ppbChallengeData);
 		*ppbChallengeData = NULL;
@@ -4496,7 +4586,7 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 	ALG_ID hashAlg;
 	sc_pkcs15_prkey_info_t *prkey_info;
 	BYTE dataToSign[0x200];
-	int r, opt_crypt_flags = 0, opt_hash_flags = 0;
+	int opt_crypt_flags;
 	size_t dataToSignLen = sizeof(dataToSign);
 	sc_pkcs15_object_t *pkey;
 
@@ -4578,111 +4668,118 @@ DWORD WINAPI CardSignData(__in PCARD_DATA pCardData, __inout PCARD_SIGNING_INFO 
 	memcpy(dataToSign, pInfo->pbData, pInfo->cbData);
 	dataToSignLen = pInfo->cbData;
 
-	if (CARD_PADDING_INFO_PRESENT & pInfo->dwSigningFlags)   {
-		BCRYPT_PKCS1_PADDING_INFO *pinf = (BCRYPT_PKCS1_PADDING_INFO *)pInfo->pPaddingInfo;
-		if (CARD_PADDING_PSS == pInfo->dwPaddingType)   {
-			logprintf(pCardData, 0, "unsupported paddingtype CARD_PADDING_PSS\n");
-			dwret = SCARD_E_UNSUPPORTED_FEATURE;
-			goto err;
-		}
-		else if (CARD_PADDING_PKCS1 != pInfo->dwPaddingType)   {
-			logprintf(pCardData, 0, "unsupported paddingtype\n");
-			dwret = SCARD_E_INVALID_PARAMETER;
-			goto err;
-		}
-			
-		if (!pinf->pszAlgId)   {
-			/* hashAlg = CALG_SSL3_SHAMD5; */
-			logprintf(pCardData, 3, "Using CALG_SSL3_SHAMD5  hashAlg\n");
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5_SHA1;
-		}
-		else   {
-			if (wcscmp(pinf->pszAlgId, L"MD5") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5;
-			else if (wcscmp(pinf->pszAlgId, L"SHA1") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA1;
-			else if (wcscmp(pinf->pszAlgId, L"SHAMD5") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5_SHA1;
-			else if (wcscmp(pinf->pszAlgId, L"SHA224") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA224;
-			else if (wcscmp(pinf->pszAlgId, L"SHA256") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA256;
-			else if (wcscmp(pinf->pszAlgId, L"SHA384") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA384;
-			else if (wcscmp(pinf->pszAlgId, L"SHA512") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA512;
-			else if (wcscmp(pinf->pszAlgId, L"RIPEMD160") == 0)
-				opt_hash_flags = SC_ALGORITHM_RSA_HASH_RIPEMD160;
-			else {
-				logprintf(pCardData, 0,"unknown AlgId %S\n",NULLWSTR(pinf->pszAlgId));
-				dwret = SCARD_E_UNSUPPORTED_FEATURE;
-				goto err;
-			}
-		}
-	}
-	else   {
+	if (0 == (CARD_PADDING_INFO_PRESENT & pInfo->dwSigningFlags))   {
+		/* When CARD_PADDING_INFO_PRESENT is not set in dwSigningFlags, this is
+		 * the basic version of the signing structure. (If this is not the
+		 * basic verison of the signing structure, the minidriver should return
+		 * ERROR_REVISION_MISMATCH.) The minidriver should only do PKCS1
+		 * padding and use the value in aiHashAlg. */
 		logprintf(pCardData, 3, "CARD_PADDING_INFO_PRESENT not set\n");
 
+		opt_crypt_flags = SC_ALGORITHM_RSA_PAD_PKCS1;
 		if (hashAlg == CALG_MD5)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5;
 		else if (hashAlg == CALG_SHA1)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA1;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA1;
 		else if (hashAlg == CALG_SSL3_SHAMD5)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_MD5_SHA1;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5_SHA1;
 		else if (hashAlg == CALG_SHA_256)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA256;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA256;
 		else if (hashAlg == CALG_SHA_384)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA384;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA384;
 		else if (hashAlg == CALG_SHA_512)
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_SHA512;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA512;
 		else if (hashAlg == (ALG_CLASS_HASH | ALG_TYPE_ANY | ALG_SID_RIPEMD160))
-			opt_hash_flags = SC_ALGORITHM_RSA_HASH_RIPEMD160;
+			opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_RIPEMD160;
 		else if (hashAlg !=0) {
 			logprintf(pCardData, 0, "bogus aiHashAlg %i\n", hashAlg);
 			dwret = SCARD_E_UNSUPPORTED_FEATURE;
 			goto err;
 		}
-	}
-	
-	if (pInfo->dwSigningFlags & CARD_PADDING_NONE)
-	{
-		/* do not add the digest info when called from CryptSignHash(CRYPT_NOHASHOID)
+	} else {
+		switch (pInfo->dwPaddingType) {
+			case CARD_PADDING_NONE:
+				opt_crypt_flags = SC_ALGORITHM_RSA_PAD_NONE;
+				break;
 
-		Note: SC_ALGORITHM_RSA_HASH_MD5_SHA1 aka CALG_SSL3_SHAMD5 do not have a digest info to be added
-		      CryptSignHash(CALG_SSL3_SHAMD5,CRYPT_NOHASHOID) is the same than CryptSignHash(CALG_SSL3_SHAMD5)
-		*/
-		opt_hash_flags = 0;
-	}
+			case CARD_PADDING_PKCS1:
+				opt_crypt_flags = SC_ALGORITHM_RSA_PAD_PKCS1;
+				BCRYPT_PKCS1_PADDING_INFO *pkcs1_pinf = (BCRYPT_PKCS1_PADDING_INFO *)pInfo->pPaddingInfo;
 
-	/* From sc-minidriver_specs_v7.docx pp.76:
-	 * 'The Base CSP/KSP performs the hashing operation on the data before passing it
-	 *	to CardSignData for signature.'
-	 * So, the SC_ALGORITHM_RSA_HASH_* flags should not be passed to pkcs15 library
-	 *	when calculating the signature .
-	 *
-	 * From sc-minidriver_specs_v7.docx pp.76:
-	 * 'If the aiHashAlg member is nonzero, it specifies the hash algorithm’s object identifier (OID)
-	 *  that is encoded in the PKCS padding.'
-	 * So, the digest info has be included into the data to be signed.
-	 * */
-	if (opt_hash_flags)   {
-		logprintf(pCardData, 2, "include digest info of the algorithm 0x%08X\n", opt_hash_flags);
-		dataToSignLen = sizeof(dataToSign);
-		r = sc_pkcs1_encode(vs->ctx, opt_hash_flags, pInfo->pbData, pInfo->cbData, dataToSign, &dataToSignLen, 0);
-		if (r)   {
-			logprintf(pCardData, 2, "PKCS#1 encode error %s\n", sc_strerror(r));
-			dwret = SCARD_E_INVALID_VALUE;
-			goto err;
+				if (!pkcs1_pinf->pszAlgId || wcscmp(pkcs1_pinf->pszAlgId, L"SHAMD5") == 0) {
+					/* hashAlg = CALG_SSL3_SHAMD5; */
+					logprintf(pCardData, 3, "Using CALG_SSL3_SHAMD5  hashAlg\n");
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5_SHA1;
+				} else if (wcscmp(pkcs1_pinf->pszAlgId, BCRYPT_MD5_ALGORITHM) == 0)
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_MD5;
+				else if (wcscmp(pkcs1_pinf->pszAlgId, BCRYPT_SHA1_ALGORITHM) == 0)
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA1;
+				else if (wcscmp(pkcs1_pinf->pszAlgId, L"SHA224") == 0)
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA224;
+				else if (wcscmp(pkcs1_pinf->pszAlgId, BCRYPT_SHA256_ALGORITHM) == 0)
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA256;
+				else if (wcscmp(pkcs1_pinf->pszAlgId, BCRYPT_SHA384_ALGORITHM) == 0)
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA384;
+				else if (wcscmp(pkcs1_pinf->pszAlgId, BCRYPT_SHA512_ALGORITHM) == 0)
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA512;
+				else if (wcscmp(pkcs1_pinf->pszAlgId, L"RIPEMD160") == 0)
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_RIPEMD160;
+				else {
+					logprintf(pCardData, 0,"unknown AlgId %S\n",NULLWSTR(pkcs1_pinf->pszAlgId));
+					dwret = SCARD_E_UNSUPPORTED_FEATURE;
+					goto err;
+				}
+				break;
+
+			case CARD_PADDING_PSS:
+				opt_crypt_flags = SC_ALGORITHM_RSA_PAD_PSS;
+				BCRYPT_PSS_PADDING_INFO *pss_pinf = (BCRYPT_PSS_PADDING_INFO *)pInfo->pPaddingInfo;
+				ULONG expected_salt_len;
+
+				if (!pss_pinf->pszAlgId || wcscmp(pss_pinf->pszAlgId, BCRYPT_SHA1_ALGORITHM) == 0) {
+					/* hashAlg = CALG_SHA1; */
+					logprintf(pCardData, 3, "Using CALG_SHA1  hashAlg\n");
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA1;
+					expected_salt_len = 160;
+				} else if (wcscmp(pss_pinf->pszAlgId, L"SHA224") == 0) {
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA224;
+					expected_salt_len = 224;
+				} else if (wcscmp(pss_pinf->pszAlgId, BCRYPT_SHA256_ALGORITHM) == 0) {
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA256;
+					expected_salt_len = 256;
+				} else if (wcscmp(pss_pinf->pszAlgId, BCRYPT_SHA384_ALGORITHM) == 0) {
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA384;
+					expected_salt_len = 384;
+				} else if (wcscmp(pss_pinf->pszAlgId, BCRYPT_SHA512_ALGORITHM) == 0) {
+					opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_SHA512;
+					expected_salt_len = 512;
+				} else {
+					logprintf(pCardData, 0,"unknown AlgId %S\n",NULLWSTR(pss_pinf->pszAlgId));
+					dwret = SCARD_E_UNSUPPORTED_FEATURE;
+					goto err;
+				}
+				/* We're strict, and only do PSS signatures with a salt length that
+				 * matches the digest length (any shorter is rubbish, any longer
+				 * is useless). */
+				if (pss_pinf->cbSalt != expected_salt_len / 8) {
+					dwret = SCARD_E_INVALID_PARAMETER;
+					goto err;
+				}
+				break;
+
+			default:
+				logprintf(pCardData, 0, "unsupported paddingtype\n");
+				dwret = SCARD_E_INVALID_PARAMETER;
+				goto err;
 		}
 	}
+	
 
 	/* Compute output size */
 	if ( prkey_info->modulus_length > 0) {
 		/* RSA */
 		pInfo->cbSignedData = (DWORD) prkey_info->modulus_length / 8;
-		opt_crypt_flags = SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_NONE;
 	} else if ( prkey_info->field_length > 0) {
-		opt_crypt_flags = SC_ALGORITHM_ECDSA_HASH_NONE;
 		switch(prkey_info->field_length) {
 			case 256:
 				/* ECDSA_P256 */
@@ -6907,6 +7004,14 @@ BOOL APIENTRY DllMain( HINSTANCE hinstDLL,
 		break;
 	case DLL_PROCESS_DETACH:
 		sc_notify_close();
+		if (lpReserved == NULL) {
+#if defined(ENABLE_OPENSSL) && defined(OPENSSL_SECURE_MALLOC_SIZE)
+			CRYPTO_secure_malloc_done();
+#endif
+#ifdef ENABLE_OPENPACE
+			EAC_cleanup();
+#endif
+		}
 		break;
 	}
 	return TRUE;

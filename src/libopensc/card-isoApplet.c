@@ -193,7 +193,6 @@ isoApplet_match_card(sc_card_t *card)
 static int
 isoApplet_init(sc_card_t *card)
 {
-	int r;
 	int i;
 	unsigned long flags = 0;
 	unsigned long ext_flags = 0;
@@ -211,8 +210,9 @@ isoApplet_init(sc_card_t *card)
 	card->cla = 0x00;
 
 	/* Obtain applet version and specific features */
-	r = isoApplet_select_applet(card, isoApplet_aid, ISOAPPLET_AID_LEN, rbuf, &rlen);
-	LOG_TEST_RET(card->ctx, r, "Error obtaining applet version.");
+	if (0 > isoApplet_select_applet(card, isoApplet_aid, ISOAPPLET_AID_LEN, rbuf, &rlen)) {
+		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_CARD, "Error obtaining applet version.");
+	}
 	if(rlen < 3)
 	{
 		assert(sizeof(rbuf) >= 3);
@@ -1211,17 +1211,17 @@ isoApplet_compute_signature(struct sc_card *card,
 static int
 isoApplet_get_challenge(struct sc_card *card, u8 *rnd, size_t len)
 {
-	struct sc_context *ctx = card->ctx;
 	int r;
 
-	LOG_FUNC_CALLED(ctx);
+	LOG_FUNC_CALLED(card->ctx);
 
-	if(card->caps & SC_CARD_CAP_RNG)   {
+	if(card->caps & SC_CARD_CAP_RNG) {
 		r = iso_ops->get_challenge(card, rnd, len);
 	} else   {
 		r = SC_ERROR_NOT_SUPPORTED;
 	}
-	LOG_FUNC_RETURN(ctx, r);
+
+	LOG_FUNC_RETURN(card->ctx, r);
 }
 
 static int isoApplet_card_reader_lock_obtained(sc_card_t *card, int was_reset)

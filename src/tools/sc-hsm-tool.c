@@ -63,7 +63,7 @@ static int	verbose = 0;
 // Some reasonable maximums
 #define MAX_CERT		4096
 #define MAX_PRKD		256
-#define MAX_KEY			1024
+#define MAX_KEY			1500
 #define MAX_WRAPPED_KEY	(MAX_CERT + MAX_PRKD + MAX_KEY)
 
 #define SEED_LENGTH 16
@@ -161,12 +161,7 @@ static int generatePrime(BIGNUM *prime, const BIGNUM *s, const int bits, unsigne
 
 	do {
 		// Generate random prime
-#if OPENSSL_VERSION_NUMBER  >= 0x00908000L /* last parm is BN_GENCB which is null in our case */
 		BN_generate_prime_ex(prime, bits, 1, NULL, NULL, NULL);
-#else
-		BN_generate_prime(prime, bits, 1, NULL, NULL, NULL, NULL );
-#endif
-
 	} while ((BN_ucmp(prime, s) == -1) && (max_rounds-- > 0));	// If prime < s or not reached 1000 tries
 
 	if (max_rounds > 0)
@@ -1508,12 +1503,12 @@ static int unwrap_key(sc_card_t *card, int keyid, const char *inf, const char *p
 		return -1;
 	}
 
-	if ((keybloblen = fread(keyblob, 1, sizeof(keyblob), in)) < 0) {
+	keybloblen = fread(keyblob, 1, sizeof(keyblob), in);
+	fclose(in);
+	if (keybloblen < 0) {
 		perror(inf);
 		return -1;
 	}
-
-	fclose(in);
 
 	ptr = keyblob;
 	if ((sc_asn1_read_tag(&ptr, keybloblen, &cla, &tag, &len) != SC_SUCCESS)
@@ -1524,7 +1519,7 @@ static int unwrap_key(sc_card_t *card, int keyid, const char *inf, const char *p
 	}
 
 	if ((sc_asn1_read_tag(&ptr, len, &cla, &tag, &olen) != SC_SUCCESS)
-		   	|| ((cla & SC_ASN1_TAG_CONSTRUCTED) != SC_ASN1_TAG_CONSTRUCTED)
+		   	|| ((cla & SC_ASN1_TAG_CONSTRUCTED) == SC_ASN1_TAG_CONSTRUCTED)
 		   	|| (tag != SC_ASN1_TAG_OCTET_STRING) ){
 		fprintf(stderr, "Invalid wrapped key format (Key binary).\n");
 		return -1;
@@ -1761,7 +1756,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !(defined LIBRESSL_VERSION_NUMBER)
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER >= 0x20700000L)
 	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
 		| OPENSSL_INIT_ADD_ALL_CIPHERS
 		| OPENSSL_INIT_ADD_ALL_DIGESTS,

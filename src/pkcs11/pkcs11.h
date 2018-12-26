@@ -480,8 +480,6 @@ struct ck_date
 
 typedef unsigned long ck_mechanism_type_t;
 
-typedef unsigned long int ck_rsa_pkcs_mgf_type_t;
-
 #define CKM_RSA_PKCS_KEY_PAIR_GEN	(0UL)
 #define CKM_RSA_PKCS			(1UL)
 #define CKM_RSA_9796			(2UL)
@@ -764,6 +762,7 @@ typedef struct CK_ECDH1_DERIVE_PARAMS {
 	unsigned char *  pPublicData;
 } CK_ECDH1_DERIVE_PARAMS;
 
+typedef unsigned long ck_rsa_pkcs_mgf_type_t;
 typedef unsigned long CK_RSA_PKCS_OAEP_SOURCE_TYPE;
 
 typedef struct CK_RSA_PKCS_OAEP_PARAMS {
@@ -776,7 +775,7 @@ typedef struct CK_RSA_PKCS_OAEP_PARAMS {
 
 typedef struct CK_RSA_PKCS_PSS_PARAMS {
 	ck_mechanism_type_t hashAlg;
-	unsigned long mgf;
+	CK_RSA_PKCS_MGF_TYPE mgf;
 	unsigned long sLen;
 } CK_RSA_PKCS_PSS_PARAMS;
 
@@ -785,6 +784,8 @@ typedef struct CK_RSA_PKCS_PSS_PARAMS {
 #define CKG_MGF1_SHA256		(0x00000002UL)
 #define CKG_MGF1_SHA384		(0x00000003UL)
 #define CKG_MGF1_SHA512		(0x00000004UL)
+
+#define CKZ_DATA_SPECIFIED	(0x00000001UL)
 
 typedef unsigned long ck_rv_t;
 

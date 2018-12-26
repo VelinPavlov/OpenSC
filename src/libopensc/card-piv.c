@@ -3,8 +3,7 @@
  * card-default.c: Support for cards with no driver
  *
  * Copyright (C) 2001, 2002  Juha Yrjölä <juha.yrjola@iki.fi>
- * Copyright (C) 2005,2006,2007,2008,2009,2010 Douglas E. Engert <deengert@anl.gov>
- * Copyright (C) 2016  Douglas E. Engert <deengert@gmail.com>
+ * Copyright (C) 2005-2016  Douglas E. Engert <deengert@gmail.com>
  * Copyright (C) 2006, Identity Alliance, Thomas Harning <thomas.harning@identityalliance.com>
  * Copyright (C) 2007, EMC, Russell Larner <rlarner@rsa.com>
  *
@@ -148,7 +147,6 @@ enum {
 };
 
 typedef struct piv_private_data {
-	sc_file_t *aid_file;
 	int enumtag;
 	int  selected_obj; /* The index into the piv_objects last selected */
 	int  return_only_cert; /* return the cert from the object */
@@ -481,6 +479,7 @@ static int piv_general_io(sc_card_t *card, int ins, int p1, int p2,
 	size_t * recvbuflen)
 {
 	int r;
+	int r_tag ;
 	sc_apdu_t apdu;
 	u8 rbufinitbuf[4096];
 	u8 *rbuf;
@@ -536,16 +535,9 @@ static int piv_general_io(sc_card_t *card, int ins, int p1, int p2,
 		 apdu.resplen = 0;
 	}
 
-	sc_log(card->ctx,
-	       "calling sc_transmit_apdu flags=%lx le=%"SC_FORMAT_LEN_SIZE_T"u, resplen=%"SC_FORMAT_LEN_SIZE_T"u, resp=%p",
-	       apdu.flags, apdu.le, apdu.resplen, apdu.resp);
-
 	/* with new adpu.c and chaining, this actually reads the whole object */
 	r = sc_transmit_apdu(card, &apdu);
 
-	sc_log(card->ctx,
-	       "DEE r=%d apdu.resplen=%"SC_FORMAT_LEN_SIZE_T"u sw1=%02x sw2=%02x",
-	       r, apdu.resplen, apdu.sw1, apdu.sw2);
 	if (r < 0) {
 		sc_log(card->ctx, "Transmit failed");
 		goto err;
@@ -574,16 +566,12 @@ static int piv_general_io(sc_card_t *card, int ins, int p1, int p2,
 		 * the buffer is bigger, so it will not produce "ASN1.tag too long!" */
 
 		body = rbuf;
-		if (sc_asn1_read_tag(&body, 0xffff, &cla_out, &tag_out, &bodylen) !=  SC_SUCCESS
+		r_tag = sc_asn1_read_tag(&body, apdu.resplen, &cla_out, &tag_out, &bodylen);
+		sc_log(card->ctx, "r_tag:%d body:%p", r_tag, body);
+		if ( (r_tag != SC_SUCCESS && r_tag != SC_ERROR_ASN1_END_OF_CONTENTS)
 				|| body == NULL)  {
-			/* only early beta cards had this problem */
-			sc_log(card->ctx, "***** received buffer tag MISSING ");
 			body = rbuf;
-			/* some readers/cards might return 6c 00 */
-			if (apdu.sw1 == 0x61  || apdu.sw2 == 0x6c )
-				bodylen = 12000;
-			else
-				bodylen = apdu.resplen;
+			bodylen = apdu.resplen;
 		}
 
 		rbuflen = body - rbuf + bodylen;
@@ -736,9 +724,6 @@ static int piv_select_aid(sc_card_t* card, u8* aid, size_t aidlen, u8* response,
 	int r;
 
 	LOG_FUNC_CALLED(card->ctx);
-	sc_log(card->ctx,
-	       "Got args: aid=%p, aidlen=%"SC_FORMAT_LEN_SIZE_T"u, response=%p, responselen=%"SC_FORMAT_LEN_SIZE_T"u",
-	       aid, aidlen, response, responselen ? *responselen : 0);
 
 	sc_format_apdu(card, &apdu,
 		response == NULL ? SC_APDU_CASE_3_SHORT : SC_APDU_CASE_4_SHORT, 0xA4, 0x04, 0x00);
@@ -759,10 +744,9 @@ static int piv_select_aid(sc_card_t* card, u8* aid, size_t aidlen, u8* response,
 
 /* find the PIV AID on the card. If card->type already filled in,
  * then look for specific AID only
- * Assumes that priv may not be present
  */
 
-static int piv_find_aid(sc_card_t * card, sc_file_t *aid_file)
+static int piv_find_aid(sc_card_t * card)
 {
 	sc_apdu_t apdu;
 	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
@@ -843,8 +827,6 @@ static int piv_find_aid(sc_card_t * card, sc_file_t *aid_file)
 		if (apdu.resp[0] != 0x6f || apdu.resp[1] > apdu.resplen - 2 )
 			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NO_CARD_SUPPORT);
 
-		card->ops->process_fci(card, aid_file, apdu.resp+2, apdu.resp[1]);
-
 		LOG_FUNC_RETURN(card->ctx, i);
 	}
 
@@ -861,6 +843,7 @@ static int piv_read_obj_from_file(sc_card_t * card, char * filename,
 	u8 **buf, size_t *buf_len)
 {
 	int r;
+	int r_tag;
 	int f = -1;
 	size_t len;
 	u8 tagbuf[16];
@@ -886,10 +869,11 @@ static int piv_read_obj_from_file(sc_card_t * card, char * filename,
 		goto err;
 	}
 	body = tagbuf;
-	if (sc_asn1_read_tag(&body, 0xfffff, &cla_out, &tag_out, &bodylen) != SC_SUCCESS
+	r_tag = sc_asn1_read_tag(&body, len, &cla_out, &tag_out, &bodylen);
+	if ((r_tag != SC_SUCCESS && r_tag != SC_ERROR_ASN1_END_OF_CONTENTS)
 			|| body == NULL) {
 		sc_log(card->ctx, "DER problem");
-		r = SC_ERROR_INVALID_ASN1_OBJECT;
+		r = SC_ERROR_FILE_NOT_FOUND;
 		goto err;
 	}
 	rbuflen = body - tagbuf + bodylen;
@@ -899,7 +883,7 @@ static int piv_read_obj_from_file(sc_card_t * card, char * filename,
 		goto err;
 	}
 	memcpy(*buf, tagbuf, len); /* copy first or only part */
-	if (rbuflen > len) {
+	if (rbuflen > len + sizeof(tagbuf)) {
 		len = read(f, *buf + sizeof(tagbuf), rbuflen - sizeof(tagbuf)); /* read rest */
 		if (len != rbuflen - sizeof(tagbuf)) {
 			r = SC_ERROR_INVALID_ASN1_OBJECT;
@@ -928,7 +912,11 @@ piv_get_data(sc_card_t * card, int enumtag, u8 **buf, size_t *buf_len)
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	sc_log(card->ctx, "#%d", enumtag);
 
-	sc_lock(card); /* do check len and get data in same transaction */
+	r = sc_lock(card); /* do check len and get data in same transaction */
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "sc_lock failed");
+		return r;
+	}
 
 	/* assert(enumtag >= 0 && enumtag < PIV_OBJ_LAST_ENUM); */
 
@@ -952,10 +940,12 @@ piv_get_data(sc_card_t * card, int enumtag, u8 **buf, size_t *buf_len)
 		rbuflen = sizeof(rbufinitbuf);
 		r = piv_general_io(card, 0xCB, 0x3F, 0xFF, tagbuf,  p - tagbuf, &rbuf, &rbuflen);
 		if (r > 0) {
+			int r_tag;
 			body = rbuf;
-			if (sc_asn1_read_tag(&body, 0xffff, &cla_out, &tag_out, &bodylen) !=  SC_SUCCESS
+			r_tag = sc_asn1_read_tag(&body, rbuflen, &cla_out, &tag_out, &bodylen);
+			if ((r_tag != SC_SUCCESS && r_tag != SC_ERROR_ASN1_END_OF_CONTENTS)
 					|| body == NULL) {
-				sc_log(card->ctx, "***** received buffer tag MISSING ");
+				sc_log(card->ctx, "r_tag:%d body:%p", r_tag, body);
 				r = SC_ERROR_FILE_NOT_FOUND;
 				goto err;
 			}
@@ -1197,9 +1187,6 @@ piv_read_binary(sc_card_t *card, unsigned int idx, unsigned char *buf, size_t co
 				r = SC_ERROR_FILE_NOT_FOUND;
 				goto err;
 			}
-			sc_log(card->ctx,
-			       "DEE rbuf=%p,rbuflen=%"SC_FORMAT_LEN_SIZE_T"u,",
-			       rbuf, rbuflen);
 			body = sc_asn1_find_tag(card->ctx, rbuf, rbuflen, rbuf[0], &bodylen);
 			if (body == NULL) {
 				/* if missing, assume its the body */
@@ -1298,7 +1285,6 @@ piv_write_certificate(sc_card_t *card, const u8* buf, size_t count, unsigned lon
 	size_t sbuflen;
 	size_t taglen;
 
-	sc_log(card->ctx, "DEE cert len=%"SC_FORMAT_LEN_SIZE_T"u", count);
 	taglen = put_tag_and_len(0x70, count, NULL)
 		+ put_tag_and_len(0x71, 1, NULL)
 		+ put_tag_and_len(0xFE, 0, NULL);
@@ -1318,9 +1304,6 @@ piv_write_certificate(sc_card_t *card, const u8* buf, size_t count, unsigned lon
 	/* Use 01 as per NIST 800-73-3 */
 	*p++ = (flags)? 0x01:0x00; /* certinfo, i.e. gzipped? */
 	put_tag_and_len(0xFE,0,&p); /* LRC tag */
-
-	sc_log(card->ctx, "DEE buf %p len %"SC_FORMAT_LEN_PTRDIFF_T"u %"SC_FORMAT_LEN_SIZE_T"u",
-	       sbuf, p - sbuf, sbuflen);
 
 	enumtag = piv_objects[priv->selected_obj].enumtag;
 	r = piv_put_data(card, enumtag, sbuf, sbuflen);
@@ -1485,7 +1468,7 @@ static int piv_get_key(sc_card_t *card, unsigned int alg_id, u8 **key, size_t *l
 	FILE *f = NULL;
 	char * keyfilename = NULL;
 	size_t expected_keylen;
-	size_t keylen;
+	size_t keylen, readlen;
 	u8 * keybuf = NULL;
 	u8 * tkey = NULL;
 
@@ -1534,11 +1517,12 @@ static int piv_get_key(sc_card_t *card, unsigned int alg_id, u8 **key, size_t *l
 	}
 	keybuf[fsize] = 0x00;    /* in case it is text need null */
 
-	if (fread(keybuf, 1, fsize, f) != fsize) {
+	if ((readlen = fread(keybuf, 1, fsize, f)) != fsize) {
 		sc_log(card->ctx, " Unable to read key\n");
 		r = SC_ERROR_WRONG_LENGTH;
 		goto err;
 	}
+	keybuf[readlen] = '\0';
 
 	tkey = malloc(expected_keylen);
 	if (!tkey) {
@@ -2130,14 +2114,16 @@ piv_get_serial_nr_from_CHUI(sc_card_t* card, sc_serial_number_t* serial)
 				/* test if guid and the fascn starts with ;9999 (in ISO 4bit + parity code) */
 				if (!(gbits && fascn[0] == 0xD4 && fascn[1] == 0xE7
 						    && fascn[2] == 0x39 && (fascn[3] | 0x7F) == 0xFF)) {
-					serial->len = fascnlen < SC_MAX_SERIALNR ? fascnlen : SC_MAX_SERIALNR;
+					/* fascnlen is 25 */
+					serial->len = fascnlen;
 					memcpy (serial->value, fascn, serial->len);
 					r = SC_SUCCESS;
 					gbits = 0; /* set to skip using guid below */
 				}
 			}
 			if (guid && gbits) {
-				serial->len = guidlen < SC_MAX_SERIALNR ? guidlen : SC_MAX_SERIALNR;
+				/* guidlen is 16 */
+				serial->len = guidlen;
 				memcpy (serial->value, guid, serial->len);
 				r = SC_SUCCESS;
 			}
@@ -2191,7 +2177,6 @@ static int piv_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)
 	u8 * opts; /*  A or M, key_ref, alg_id */
 
 	LOG_FUNC_CALLED(card->ctx);
-	sc_log(card->ctx, "cmd=%ld ptr=%p", cmd, ptr);
 
 	if (priv == NULL) {
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
@@ -2230,54 +2215,41 @@ static int piv_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)
 
 static int piv_get_challenge(sc_card_t *card, u8 *rnd, size_t len)
 {
-	u8 sbuf[16];
+	/* Dynamic Authentication Template (Challenge) */
+	u8 sbuf[] = {0x7c, 0x02, 0x81, 0x00};
 	u8 *rbuf = NULL;
-	size_t rbuflen = 0;
-	u8 *p, *q;
+	const u8 *p;
+	size_t rbuf_len = 0, out_len = 0;
 	int r;
+	unsigned int tag, cla;
 
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+	LOG_FUNC_CALLED(card->ctx);
 
-	sc_log(card->ctx, "challenge len=%"SC_FORMAT_LEN_SIZE_T"u", len);
+	/* NIST 800-73-3 says use 9B, previous verisons used 00 */
+	r = piv_general_io(card, 0x87, 0x00, 0x9B, sbuf, sizeof sbuf, &rbuf, &rbuf_len);
+	LOG_TEST_GOTO_ERR(card->ctx, r, "GENERAL AUTHENTICATE failed");
 
-	r = sc_lock(card);
-	if (r != SC_SUCCESS)
-		LOG_FUNC_RETURN(card->ctx, r);
-
-	p = sbuf;
-	*p++ = 0x7c;
-	*p++ = 0x02;
-	*p++ = 0x81;
-	*p++ = 0x00;
-
-	/* assuming 8 byte response ? */
-	/* should take what the card returns */
-	while (len > 0) {
-		size_t n = len > 8 ? 8 : len;
-
-		/* NIST 800-73-3 says use 9B, previous versions used 00 */
-		r = piv_general_io(card, 0x87, 0x00, 0x9B, sbuf, p - sbuf, &rbuf, &rbuflen);
-		if (r < 0) {
-			sc_unlock(card);
-			LOG_FUNC_RETURN(card->ctx, r);
-		}
-		q = rbuf;
-		if ( (*q++ != 0x7C)
-			|| (*q++ != rbuflen - 2)
-			|| (*q++ != 0x81)
-			|| (*q++ != rbuflen - 4)) {
-			r =  SC_ERROR_INVALID_DATA;
-			sc_unlock(card);
-			LOG_FUNC_RETURN(card->ctx, r);
-		}
-		memcpy(rnd, q, n);
-		len -= n;
-		rnd += n;
-		free(rbuf);
-		rbuf = NULL;
+	p = rbuf;
+	r = sc_asn1_read_tag(&p, rbuf_len, &cla, &tag, &out_len);
+	if (r < 0 || (cla|tag) != 0x7C) {
+		LOG_TEST_GOTO_ERR(card->ctx, SC_ERROR_INVALID_DATA, "Can't find Dynamic Authentication Template");
 	}
 
-	r = sc_unlock(card);
+	rbuf_len = out_len;
+	r = sc_asn1_read_tag(&p, rbuf_len, &cla, &tag, &out_len);
+	if (r < 0 || (cla|tag) != 0x81) {
+		LOG_TEST_GOTO_ERR(card->ctx, SC_ERROR_INVALID_DATA, "Can't find Challenge");
+	}
+
+	if (len < out_len) {
+		out_len = len;
+	}
+	memcpy(rnd, p, out_len);
+
+	r = (int) out_len;
+
+err:
+	free(rbuf);
 
 	LOG_FUNC_RETURN(card->ctx, r);
 
@@ -2348,7 +2320,7 @@ static int piv_validate_general_authentication(sc_card_t *card,
 
 	u8 sbuf[4096]; /* needs work. for 3072 keys, needs 384+10 or so */
 	u8 *rbuf = NULL;
-	size_t rbuflen;
+	size_t rbuflen = 0;
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 
@@ -2387,15 +2359,15 @@ static int piv_validate_general_authentication(sc_card_t *card,
 	r = piv_general_io(card, 0x87, real_alg_id, priv->key_ref,
 			sbuf, p - sbuf, &rbuf, &rbuflen);
 
-	if ( r >= 0) {
-	 	body = sc_asn1_find_tag(card->ctx, rbuf, rbuflen, 0x7c, &bodylen);
-
+	if (r >= 0) {
+		body = sc_asn1_find_tag(card->ctx, rbuf, rbuflen, 0x7c, &bodylen);
 		if (body) {
 			tag = sc_asn1_find_tag(card->ctx, body,  bodylen, 0x82, &taglen);
 			if (tag) {
 				memcpy(out, tag, taglen);
 				r = taglen;
-			}
+			} else
+				r = SC_ERROR_INVALID_DATA;
 		} else
 			r = SC_ERROR_INVALID_DATA;
 	}
@@ -2613,14 +2585,12 @@ static int piv_parse_discovery(sc_card_t *card, u8 * rbuf, size_t rbuflen, int a
 			goto err;
 		}
 
-	sc_log(card->ctx,
-	       "Discovery 0x%2.2x 0x%2.2x %p:%"SC_FORMAT_LEN_SIZE_T"u",
-	       cla_out, tag_out, body, bodylen);
-	if ( cla_out+tag_out == 0x7E && body != NULL && bodylen != 0) {
-		aidlen = 0;
-		aid = sc_asn1_find_tag(card->ctx, body, bodylen, 0x4F, &aidlen);
-		sc_log(card->ctx, "Discovery aid=%p:%"SC_FORMAT_LEN_SIZE_T"u",
-		       aid, aidlen);
+		sc_log(card->ctx,
+				"Discovery 0x%2.2x 0x%2.2x %p:%"SC_FORMAT_LEN_SIZE_T"u",
+				cla_out, tag_out, body, bodylen);
+		if ( cla_out+tag_out == 0x7E && body != NULL && bodylen != 0) {
+			aidlen = 0;
+			aid = sc_asn1_find_tag(card->ctx, body, bodylen, 0x4F, &aidlen);
 			if (aid == NULL || aidlen < piv_aids[0].len_short ||
 				memcmp(aid,piv_aids[0].value,piv_aids[0].len_short) != 0) { /*TODO look at long */
 				sc_log(card->ctx, "Discovery object not PIV");
@@ -2629,9 +2599,6 @@ static int piv_parse_discovery(sc_card_t *card, u8 * rbuf, size_t rbuflen, int a
 			}
 			if (aid_only == 0) {
 				pinp = sc_asn1_find_tag(card->ctx, body, bodylen, 0x5F2F, &pinplen);
-				sc_log(card->ctx,
-				       "Discovery pinp=%p:%"SC_FORMAT_LEN_SIZE_T"u",
-				       pinp, pinplen);
 				if (pinp && pinplen == 2) {
 					sc_log(card->ctx, "Discovery pinp flags=0x%2.2x 0x%2.2x",*pinp, *(pinp+1));
 					r = SC_SUCCESS;
@@ -2661,8 +2628,6 @@ static int piv_process_discovery(sc_card_t *card)
 	if (r < 0)
 		goto err;
 
-	sc_log(card->ctx, "Discovery = %p:%"SC_FORMAT_LEN_SIZE_T"u", rbuf,
-	       rbuflen);
 	/* the object is now cached, see what we have */
 	r = piv_parse_discovery(card, rbuf, rbuflen, 0);
 
@@ -2872,7 +2837,7 @@ piv_process_history(sc_card_t *card)
 			}
 			keyref = sc_asn1_find_tag(card->ctx, seq, seqlen, 0x04, &keyreflen);
 			if (!keyref || keyreflen != 1 ||
-					(*keyref < 0x82 && *keyref > 0x95)) {
+					(*keyref < 0x82 || *keyref > 0x95)) {
 				sc_log(card->ctx, "DER problem");
 				r = SC_ERROR_INVALID_ASN1_OBJECT;
 				goto err;
@@ -2938,19 +2903,11 @@ piv_finish(sc_card_t *card)
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	if (priv) {
-		sc_file_free(priv->aid_file);
 		if (priv->w_buf)
 			free(priv->w_buf);
 		if (priv->offCardCertURL)
 			free(priv->offCardCertURL);
 		for (i = 0; i < PIV_OBJ_LAST_ENUM - 1; i++) {
-			sc_log(card->ctx,
-			       "DEE freeing #%d, 0x%02x %p:%"SC_FORMAT_LEN_SIZE_T"u %p:%"SC_FORMAT_LEN_SIZE_T"u",
-			       i, priv->obj_cache[i].flags,
-			       priv->obj_cache[i].obj_data,
-			       priv->obj_cache[i].obj_len,
-			       priv->obj_cache[i].internal_obj_data,
-			       priv->obj_cache[i].internal_obj_len);
 			if (priv->obj_cache[i].obj_data)
 				free(priv->obj_cache[i].obj_data);
 			if (priv->obj_cache[i].internal_obj_data)
@@ -2999,10 +2956,7 @@ static int piv_match_card(sc_card_t *card)
 
 static int piv_match_card_continued(sc_card_t *card)
 {
-	int i, i7e, k;
-	size_t j;
-	u8 *p, *pe;
-	sc_file_t aidfile;
+	int i, r;
 	int type  = -1;
 	piv_private_data_t *priv = NULL;
 	int saved_type = card->type;
@@ -3050,29 +3004,28 @@ static int piv_match_card_continued(sc_card_t *card)
 			 *   73 66 74 65 20 63 64 31 34 34
 			 * will check for 73 66 74 65
 			 */
-			else if (card->reader->atr_info.hist_bytes_len >= 4 &&
-					!(memcmp(card->reader->atr_info.hist_bytes, "sfte", 4))) {
+			else if (card->reader->atr_info.hist_bytes_len >= 4
+					&& !(memcmp(card->reader->atr_info.hist_bytes, "sfte", 4))) {
 				type = SC_CARD_TYPE_PIV_II_GI_DE;
 			}
 
-			else if (card->reader->atr_info.hist_bytes[0] == 0x80u) { /* compact TLV */
-				p = card->reader->atr_info.hist_bytes;
-				pe = p + card->reader->atr_info.hist_bytes_len;
-				p++; /* skip 0x80u byte */
-				while (p < pe && type == -1) {
-					j = *p & 0x0fu; /* length */
-					if ((*p++ & 0xf0u) == 0xf0u) { /*looking for 15 */
-						if ((p + j) <= pe) {
-							for (k = 0; piv_aids[k].len_long != 0; k++) {
-								if (j == piv_aids[k].len_long
-									&& !memcmp(p, piv_aids[k].value,j)) {
-									type = SC_CARD_TYPE_PIV_II_HIST;
-									break;
-								}
-							}
+			else if (card->reader->atr_info.hist_bytes_len > 0
+					&& card->reader->atr_info.hist_bytes[0] == 0x80u) { /* compact TLV */
+				size_t datalen;
+				const u8 *data = sc_compacttlv_find_tag(card->reader->atr_info.hist_bytes + 1,
+									card->reader->atr_info.hist_bytes_len - 1,
+									0xF0, &datalen);
+
+				if (data != NULL) {
+					int k;
+
+					for (k = 0; piv_aids[k].len_long != 0; k++) {
+						if (datalen == piv_aids[k].len_long
+							&& !memcmp(data, piv_aids[k].value, datalen)) {
+							type = SC_CARD_TYPE_PIV_II_HIST;
+							break;
 						}
 					}
-					p += j;
 				}
 			}
 		}
@@ -3091,7 +3044,6 @@ static int piv_match_card_continued(sc_card_t *card)
 		card->type = type;
 
 	card->drv_data = priv; /* will free if no match, or pass on to piv_init */
-	priv->aid_file = sc_file_new();
 	priv->selected_obj = -1;
 	priv->pin_preference = 0x80; /* 800-73-3 part 1, table 3 */
 	priv->logged_in = SC_PIN_STATE_UNKNOWN;
@@ -3103,7 +3055,13 @@ static int piv_match_card_continued(sc_card_t *card)
 		if(piv_objects[i].flags & PIV_OBJECT_NOT_PRESENT)
 			priv->obj_cache[i].flags |= PIV_OBJ_CACHE_NOT_PRESENT;
 
-	sc_lock(card);
+	r = sc_lock(card);
+	if (r != SC_SUCCESS) {
+		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "sc_lock failed\n");
+		piv_finish(card);
+		card->type = saved_type;
+		return 0;
+	}
 
 	/*
 	 * detect if active AID is PIV. NIST 800-73 says Only one PIV application per card
@@ -3118,7 +3076,7 @@ static int piv_match_card_continued(sc_card_t *card)
 
 	if (i < 0) {
 		/* Detect by selecting applet */
-		i = piv_find_aid(card, &aidfile);
+		i = piv_find_aid(card);
 	}
 
 	if (i >= 0) {
@@ -3129,7 +3087,8 @@ static int piv_match_card_continued(sc_card_t *card)
 		 * SC_ERROR_FILE_NOT_FOUND means we cannot use discovery 
 		 * to test for active AID.
 		 */
-		i7e = piv_find_discovery(card);
+		int i7e = piv_find_discovery(card);
+
 		if (i7e != 0 && i7e !=  SC_ERROR_FILE_NOT_FOUND) {
 			priv->card_issues |= CI_DISCOVERY_USELESS;
 			priv->obj_cache[PIV_OBJ_DISCOVERY].flags |= PIV_OBJ_CACHE_NOT_PRESENT;
@@ -3296,11 +3255,9 @@ static int piv_init(sc_card_t *card)
 
 	piv_process_discovery(card);
 
-	r = 0;
-
 	priv->pstate=PIV_STATE_NORMAL;
 	sc_unlock(card) ; /* obtained in piv_match */
-	LOG_FUNC_RETURN(card->ctx, r);
+	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 }
 
 
@@ -3455,6 +3412,16 @@ piv_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 		data->pin1.tries_left = priv->tries_left;
 		if (tries_left)
 			*tries_left = priv->tries_left;
+
+		/*
+		 * If called to check on the login state for a context specific login
+		 * return not logged in. Needed because of logic in e6f7373ef066  
+		 */
+		if (data->pin_type == SC_AC_CONTEXT_SPECIFIC) {
+			data->pin1.logged_in = 0;
+			 LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+		}
+
 		if (priv->logged_in == SC_PIN_STATE_LOGGED_IN) {
 			/* Avoid status requests when the user is logged in to handle NIST
 			 * 800-73-4 Part 2:
@@ -3478,7 +3445,11 @@ piv_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 	if (data->cmd == SC_PIN_CMD_VERIFY && data->pin_type == SC_AC_CONTEXT_SPECIFIC) {
 		priv->context_specific = 1;
 		sc_log(card->ctx,"Starting CONTEXT_SPECIFIC verify");
-		sc_lock(card);
+		r = sc_lock(card);
+		if (r != SC_SUCCESS) {
+			sc_log(card->ctx, "sc_lock failed");
+			return r;
+		}
 	}
 
 	priv->pin_cmd_verify = 1; /* tell piv_check_sw its a verify to save sw1, sw2 */
@@ -3495,7 +3466,7 @@ piv_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 	/* if access to applet is know to be reset by other driver  we select_aid and try again */
 	if ( priv->card_issues & CI_OTHER_AID_LOSE_STATE && priv->pin_cmd_verify_sw1 == 0x6DU) {
 		sc_log(card->ctx, "AID may be lost doing piv_find_aid and retry pin_cmd");
-		piv_find_aid(card, priv->aid_file); /* return not tested */
+		piv_find_aid(card);
 
 		priv->pin_cmd_verify = 1; /* tell piv_check_sw its a verify to save sw1, sw2 */
 		r = iso_drv->ops->pin_cmd(card, data, tries_left);
@@ -3584,19 +3555,12 @@ static int piv_card_reader_lock_obtained(sc_card_t *card, int was_reset)
 		goto err;
 	}
 
-	/* can we detect and then select the PIV AID without losing the login state? */
-	if ((priv->card_issues & CI_DISCOVERY_USELESS)
-			&& (priv->card_issues & CI_PIV_AID_LOSE_STATE)) {
-		r = 0; /* do nothing, hope card was not interfered with */
-		goto err;
-	}
-
 	/* make sure our application is active */
 
 	/* first see if AID is active AID by reading discovery object '7E' */
 	/* If not try selecting AID */
 
-	/* but if x card does not support DISCOVERY object we can not use it */
+	/* but if card does not support DISCOVERY object we can not use it */
 	if (priv->card_issues & CI_DISCOVERY_USELESS) {
 	    r =  SC_ERROR_NO_CARD_SUPPORT;
 	} else {
@@ -3604,7 +3568,7 @@ static int piv_card_reader_lock_obtained(sc_card_t *card, int was_reset)
 	}
 
 	if (r < 0) {
-		if (!(priv->card_issues & CI_PIV_AID_LOSE_STATE)) {
+		if (was_reset > 0 || !(priv->card_issues & CI_PIV_AID_LOSE_STATE)) {
 			r = piv_select_aid(card, piv_aids[0].value, piv_aids[0].len_short, temp, &templen);
 		} else {
 			r = 0; /* cant do anything with this card, hope there was no interference */

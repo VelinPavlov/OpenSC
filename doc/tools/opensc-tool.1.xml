@@ -112,24 +112,25 @@
 				</varlistentry>
 				<varlistentry>
 					<term>
-						<option>--reader</option> <replaceable>num</replaceable>,
-						<option>-r</option> <replaceable>num</replaceable>
+						<option>--reader</option> <replaceable>arg</replaceable>,
+						<option>-r</option> <replaceable>arg</replaceable>
 					</term>
 					<listitem>
 						<para>
-							Specify the reader to use. By default, the first
+							Number of the reader to use. By default, the first
 							reader with a present card is used. If
-							<replaceable>num</replaceable> is an ATR, the
+							<replaceable>arg</replaceable> is an ATR, the
 							reader with a matching card will be chosen.
 						</para>
 					</listitem>
 				</varlistentry>
 				<varlistentry>
 					<term>
-						<option>--reset</option>[=<replaceable>type</replaceable>],
+						<option>--reset</option> <arg choice="opt"><replaceable>type</replaceable></arg>,
 					</term>
 					<listitem><para>Resets the card in reader.
-					The default reset type is <literal>cold</literal>, but warm reset is also possible.</para></listitem>
+					The default reset type is <literal>cold</literal>,
+					but <literal>warm</literal> reset is also possible.</para></listitem>
 				</varlistentry>
 				<varlistentry>
 					<term>
@@ -173,6 +174,12 @@
 				<manvolnum>1</manvolnum>
 			</citerefentry>
 		</para>
+	</refsect1>
+
+	<refsect1>
+		<title>Authors</title>
+		<para><command>opensc-tool</command> was written by
+		Juha Yrjölä <email>juha.yrjola@iki.fi</email>.</para>
 	</refsect1>
 
 </refentry>

@@ -125,7 +125,7 @@ scconf_block *_sc_match_atr_block(sc_context_t *ctx, struct sc_card_driver *driv
 
 /* Returns an index number if a match was found, -1 otherwise. table has to
  * be null terminated. */
-int _sc_match_atr(struct sc_card *card, struct sc_atr_table *table, int *type_out);
+int _sc_match_atr(struct sc_card *card, const struct sc_atr_table *table, int *type_out);
 
 int _sc_card_add_algorithm(struct sc_card *card, const struct sc_algorithm_info *info);
 int _sc_card_add_symmetric_alg(sc_card_t *card, unsigned int algorithm,
@@ -155,11 +155,11 @@ int sc_pkcs1_strip_digest_info_prefix(unsigned int *algorithm,
  * @param  inlen   IN  length of the input
  * @param  out     OUT output buffer (in == out is allowed)
  * @param  outlen  OUT length of the output buffer
- * @param  modlen  IN  length of the modulus in bytes
+ * @param  mod_bits IN  length of the modulus in bits
  * @return SC_SUCCESS on success and an error code otherwise
  */
 int sc_pkcs1_encode(sc_context_t *ctx, unsigned long flags,
-		const u8 *in, size_t inlen, u8 *out, size_t *outlen, size_t modlen);
+		const u8 *in, size_t inlen, u8 *out, size_t *outlen, size_t mod_bits);
 /**
  * Get the necessary padding and sec. env. flags.
  * @param  ctx     IN  sc_contex_t object
@@ -247,13 +247,12 @@ int sc_apdu_set_resp(sc_context_t *ctx, sc_apdu_t *apdu, const u8 *buf,
 /**
  * Logs APDU
  * @param  ctx          sc_context_t object
- * @param  level	log if ctx->debug >= level
  * @param  buf          buffer with the APDU data
  * @param  len          length of the APDU
  * @param  is_outgoing  != 0 if the data is send to the card
  */
-#define sc_apdu_log(ctx, level, data, len, is_outgoing) \
-	sc_debug_hex(ctx, level, is_outgoing != 0 ? "Outgoing APDU" : "Incoming APDU", data, len)
+#define sc_apdu_log(ctx, data, len, is_outgoing) \
+	sc_debug_hex(ctx, SC_LOG_DEBUG_NORMAL, is_outgoing != 0 ? "Outgoing APDU" : "Incoming APDU", data, len)
 
 extern struct sc_reader_driver *sc_get_pcsc_driver(void);
 extern struct sc_reader_driver *sc_get_ctapi_driver(void);

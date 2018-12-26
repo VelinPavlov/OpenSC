@@ -199,7 +199,7 @@ static int ctapi_transmit(sc_reader_t *reader, sc_apdu_t *apdu)
 	r = sc_apdu_get_octets(reader->ctx, apdu, &sbuf, &ssize, SC_PROTO_RAW);
 	if (r != SC_SUCCESS)
 		goto out;
-	sc_apdu_log(reader->ctx, SC_LOG_DEBUG_NORMAL, sbuf, ssize, 1);
+	sc_apdu_log(reader->ctx, sbuf, ssize, 1);
 	r = ctapi_internal_transmit(reader, sbuf, ssize,
 					rbuf, &rsize, apdu->control);
 	if (r < 0) {
@@ -207,7 +207,7 @@ static int ctapi_transmit(sc_reader_t *reader, sc_apdu_t *apdu)
 		sc_log(reader->ctx, "unable to transmit");
 		goto out;
 	}
-	sc_apdu_log(reader->ctx, SC_LOG_DEBUG_NORMAL, rbuf, rsize, 0);
+	sc_apdu_log(reader->ctx, rbuf, rsize, 0);
 	/* set response */
 	r = sc_apdu_set_resp(reader->ctx, apdu, rbuf, rsize);
 out:
@@ -239,7 +239,6 @@ static int ctapi_connect(sc_reader_t *reader)
 	char rv;
 	u8 cmd[9], rbuf[256], sad, dad;
 	unsigned short lr;
-	int r;
 
 	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
 		return SC_ERROR_NOT_ALLOWED;
@@ -259,13 +258,13 @@ static int ctapi_connect(sc_reader_t *reader)
 		return SC_ERROR_TRANSMIT_FAILED;
 	}
 	if (lr < 2)
-		SC_FUNC_RETURN(reader->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INTERNAL);
+		LOG_FUNC_RETURN(reader->ctx, SC_ERROR_INTERNAL);
 	lr -= 2;
 	if (lr > SC_MAX_ATR_SIZE)
 		return SC_ERROR_INTERNAL;
 	reader->atr.len = lr;
 	memcpy(reader->atr.value, rbuf, lr);
-	r = _sc_parse_atr(reader);
+	_sc_parse_atr(reader);
 
 	return 0;
 }

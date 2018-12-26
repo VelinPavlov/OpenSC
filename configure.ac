@@ -5,8 +5,9 @@ AC_PREREQ(2.60)
 define([PRODUCT_NAME], [OpenSC])
 define([PRODUCT_TARNAME], [opensc])
 define([PRODUCT_BUGREPORT], [https://github.com/OpenSC/OpenSC/issues])
+define([PRODUCT_URL], [https://github.com/OpenSC/OpenSC])
 define([PACKAGE_VERSION_MAJOR], [0])
-define([PACKAGE_VERSION_MINOR], [18])
+define([PACKAGE_VERSION_MINOR], [19])
 define([PACKAGE_VERSION_FIX], [0])
 define([PACKAGE_SUFFIX], [])
 
@@ -18,10 +19,11 @@ define([VS_FF_PRODUCT_NAME], [OpenSC smartcard framework])
 define([VS_FF_PRODUCT_UPDATES], [https://github.com/OpenSC/OpenSC/releases])
 define([VS_FF_PRODUCT_URL], [https://github.com/OpenSC/OpenSC])
 
-m4_include(version.m4)
 m4_sinclude(version.m4.ci)
 
-AC_INIT([PRODUCT_NAME],[PACKAGE_VERSION_MAJOR.PACKAGE_VERSION_MINOR.PACKAGE_VERSION_FIX[]PACKAGE_SUFFIX],[PRODUCT_BUGREPORT],[PRODUCT_TARNAME])
+m4_define([openssl_minimum_version], [0.9.8])
+
+AC_INIT([PRODUCT_NAME],[PACKAGE_VERSION_MAJOR.PACKAGE_VERSION_MINOR.PACKAGE_VERSION_FIX[]PACKAGE_SUFFIX],[PRODUCT_BUGREPORT],[PRODUCT_TARNAME],[PRODUCT_URL])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
@@ -123,9 +125,6 @@ case "${host}" in
 		PROFILE_DIR_DEFAULT="\$(pkgdatadir)"
 	;;
 esac
-AC_DEFINE_UNQUOTED([DEBUG_FILE], ["${DEBUG_FILE}"], [Debug file])
-AC_DEFINE_UNQUOTED([PROFILE_DIR], ["${PROFILE_DIR}"], [Directory of profiles])
-AC_DEFINE_UNQUOTED([PROFILE_DIR_DEFAULT], ["${PROFILE_DIR_DEFAULT}"], [Default directory of profiles])
 
 case "${host}" in
 	*-mingw*)
@@ -173,10 +172,17 @@ AC_ARG_ENABLE(
 
 AC_ARG_ENABLE(
 	[openssl],
-	[AS_HELP_STRING([--enable-openssl],[enable openssl linkage @<:@detect@:>@])],
+	[AS_HELP_STRING([--enable-openssl],[enable OpenSSL linkage @<:@detect@:>@])],
 	,
 	[enable_openssl="detect"]
 )
+
+AC_ARG_ENABLE([openssl-secure-malloc],
+    [AC_HELP_STRING([--openssl-secure-malloc=<SIZE_IN_BYTES>],
+        [Enable OpenSSL secure memory by specifying its size in bytes, must be a power of 2 @<:@disabled@:>@])],
+    [], [enable_openssl_secure_malloc=no])
+AS_IF([test $enable_openssl_secure_malloc != no],
+	[AC_DEFINE_UNQUOTED([OPENSSL_SECURE_MALLOC_SIZE],[$enable_openssl_secure_malloc],[Size of OpenSSL secure memory in bytes, must be a power of 2])])
 
 AC_ARG_ENABLE(
 	[openpace],
@@ -255,11 +261,25 @@ AC_ARG_ENABLE(
 	[enable_notify="detect"]
 )
 
+AC_ARG_ENABLE(
+	[tests],
+	[AS_HELP_STRING([--enable-tests],[Build tests in src/tests/ directory @<:@detect@:>@])],
+	,
+	[enable_tests="detect"]
+)
+
 AC_ARG_WITH(
 	[xsl-stylesheetsdir],
 	[AS_HELP_STRING([--with-xsl-stylesheetsdir=PATH],[docbook xsl-stylesheets for svn build @<:@detect@:>@])],
 	[xslstylesheetsdir="${withval}"],
 	[xslstylesheetsdir="detect"]
+)
+
+AC_ARG_WITH(
+	[completiondir],
+	[AS_HELP_STRING([--with-completiondir=PATH],[Directory of Bash completion @<:@detect@:>@])],
+	[completiondir="${withval}"],
+	[completiondir="detect"]
 )
 
 AC_ARG_WITH(
@@ -333,7 +353,6 @@ AC_MSG_RESULT([${xslstylesheetsdir}])
 AC_MSG_CHECKING([git checkout])
 GIT_CHECKOUT="no"
 if test -n "${GIT}" -a -d "${srcdir}/.git"; then
-	AC_DEFINE([HAVE_CONFIG_VERSION_H], [1], [extra version available in config-version.h])
 	GIT_CHECKOUT="yes"
 fi
 AC_MSG_RESULT([${GIT_CHECKOUT}])
@@ -511,6 +530,15 @@ if test "${enable_notify}" = "yes"; then
 	fi
 fi
 
+have_cmocka="yes"
+PKG_CHECK_MODULES([CMOCKA], [cmocka >= 1.0.1],,[have_cmocka="no"])
+AC_CHECK_HEADER([setjmp.h])
+AC_CHECK_HEADER([cmocka.h],, [have_cmocka="no"],
+[#include <stdarg.h>
+#include <stddef.h>
+#include <setjmp.h>
+])
+
 AC_ARG_VAR([ZLIB_CFLAGS], [C compiler flags for zlib])
 AC_ARG_VAR([ZLIB_LIBS], [linker flags for zlib])
 if test -z "${ZLIB_LIBS}"; then
@@ -591,21 +619,19 @@ fi
 
 PKG_CHECK_MODULES(
 	[OPENSSL],
-	[libcrypto >= 0.9.7],
+	[
+		libcrypto >= openssl_minimum_version
+		openssl >= openssl_minimum_version
+	],
 	[have_openssl="yes"],
-	[PKG_CHECK_MODULES(
-		[OPENSSL],
-		[openssl >= 0.9.7],
-		[have_openssl="yes"],
-		[AC_CHECK_LIB(
-			[crypto],
-			[RSA_version],
-			[
-				have_openssl="yes"
-				OPENSSL_LIBS="-lcrypto"
-			],
-			[have_openssl="no"]
-		)]
+	[AC_CHECK_LIB(
+		[crypto],
+		[RSA_version],
+		[
+			have_openssl="yes"
+			OPENSSL_LIBS="-lcrypto"
+		],
+		[have_openssl="no"]
 	)]
 )
 
@@ -635,6 +661,23 @@ if test "${enable_openssl}" = "yes"; then
 else
 	OPENSSL_CFLAGS=""
 	OPENSSL_LIBS=""
+fi
+
+if test "${enable_tests}" = "detect"; then
+	if test "${have_cmocka}" = "yes" -a "${have_openssl}" = "yes"; then
+		enable_tests="yes"
+	else
+		enable_tests="no"
+	fi
+fi
+
+if test "${enable_tests}" = "yes"; then
+	if test "${have_cmocka}" != "yes"; then
+		AC_MSG_ERROR([Tests required, but cmocka is not available])
+	fi
+	if test "${have_openssl}" != "yes"; then
+		AC_MSG_ERROR([Tests required, but openssl is not available])
+	fi
 fi
 
 
@@ -810,6 +853,14 @@ if test "${enable_cryptotokenkit}" = "yes"; then
 	AC_DEFINE([ENABLE_CRYPTOTOKENKIT], [1], [Define if CryptoTokenKit is to be enabled])
 fi
 
+if test "${completiondir}" = "detect"; then
+	echo completion ${completiondir}
+	PKG_CHECK_MODULES([BASH_COMPLETION], [bash-completion >= 2.0],
+		[completiondir="`pkg-config --variable=completionsdir bash-completion`"],
+		[completiondir="${sysconfdir}/bash_completion.d"])
+fi
+AC_SUBST([completiondir])
+
 
 AC_SUBST(DYN_LIB_EXT)
 AC_SUBST(LIBDIR)
@@ -833,26 +884,23 @@ if test "${enable_sm}" = "yes"; then
 	DEFAULT_SM_MODULE="${LIB_PRE}smm-local${DYN_LIB_EXT}"
 	case "${host}" in
 		*-mingw*|*-winnt*|*-cygwin*)
-			DEFAULT_SM_MODULE_PATH="\# module_path = \"\";"
+			DEFAULT_SM_MODULE_PATH="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\tools"
 		;;
 		*)
-			DEFAULT_SM_MODULE_PATH="module_path = \$(libdir);"
+			DEFAULT_SM_MODULE_PATH="${libdir}"
 		;;
 	esac
-	AC_DEFINE_UNQUOTED([DEFAULT_SM_MODULE], ["${DEFAULT_SM_MODULE}"], [Default SM module])
-	AC_DEFINE_UNQUOTED([DEFAULT_SM_MODULE_PATH], ["${DEFAULT_SM_MODULE_PATH}"], [Default SM module path])
 fi
 
 if test "${with_pkcs11_provider}" = "detect"; then
 	if test "${WIN32}" != "yes"; then
-		DEFAULT_PKCS11_PROVIDER="opensc-pkcs11${DYN_LIB_EXT}"
+		DEFAULT_PKCS11_PROVIDER="${libdir}/opensc-pkcs11${DYN_LIB_EXT}"
 	else
 		DEFAULT_PKCS11_PROVIDER="%PROGRAMFILES%\\\OpenSC Project\\\OpenSC\\\pkcs11\\\opensc-pkcs11.dll"
 	fi
 else
 	DEFAULT_PKCS11_PROVIDER="${with_pkcs11_provider}"
 fi
-AC_DEFINE_UNQUOTED([DEFAULT_PKCS11_PROVIDER], ["${DEFAULT_PKCS11_PROVIDER}"], [Default PKCS11 provider])
 
 if test "${enable_man}" = "detect"; then
 	if test "${WIN32}" = "yes"; then
@@ -871,9 +919,6 @@ if test "${enable_man}" = "yes" -o "${enable_doc}" = "yes"; then
 	AC_MSG_RESULT([ok])
 fi
 
-AC_ARG_VAR([HELP2MAN],
-           [absolute path to help2man used for man page generation of npa-tool])
-AC_PATH_PROG(HELP2MAN, help2man, not found)
 AC_ARG_VAR([GENGETOPT],
            [absolute path to gengetopt used for command line parsing of npa-tool])
 AC_PATH_PROG(GENGETOPT, gengetopt, not found)
@@ -997,6 +1042,7 @@ AM_CONDITIONAL([ENABLE_MINIDRIVER_SETUP_CUSTOMACTION], [test "${enable_minidrive
 AM_CONDITIONAL([ENABLE_SM], [test "${enable_sm}" = "yes"])
 AM_CONDITIONAL([ENABLE_DNIE_UI], [test "${enable_dnie_ui}" = "yes"])
 AM_CONDITIONAL([ENABLE_NPATOOL], [test "${ENABLE_NPATOOL}" = "yes"])
+AM_CONDITIONAL([ENABLE_TESTS], [test "${enable_tests}" = "yes"])
 AM_CONDITIONAL([GIT_CHECKOUT], [test "${GIT_CHECKOUT}" = "yes"])
 
 if test "${enable_pedantic}" = "yes"; then
@@ -1011,7 +1057,9 @@ AC_CONFIG_FILES([
 	Makefile
 	doc/Makefile
 	doc/tools/Makefile
+	doc/files/Makefile
 	etc/Makefile
+	tests/Makefile
 	src/Makefile
 	src/common/Makefile
 	src/ui/Makefile
@@ -1025,6 +1073,7 @@ AC_CONFIG_FILES([
 	src/scconf/Makefile
 	src/tests/Makefile
 	src/tests/regression/Makefile
+	src/tests/p11test/Makefile
 	src/tools/Makefile
 	src/tools/versioninfo-tools.rc
 	src/tools/versioninfo-opensc-notify.rc
@@ -1065,6 +1114,7 @@ Product URL:             ${OPENSC_VS_FF_PRODUCT_URL}
 
 User binaries:           $(eval eval eval echo "${bindir}")
 Configuration files:     $(eval eval eval echo "${sysconfdir}")
+Bash completion:         ${completiondir}
 XSL stylesheets:         ${xslstylesheetsdir}
 
 man support:             ${enable_man}
@@ -1073,6 +1123,7 @@ thread locking support:  ${enable_thread_locking}
 zlib support:            ${enable_zlib}
 readline support:        ${enable_readline}
 OpenSSL support:         ${enable_openssl}
+OpenSSL secure memory:   ${enable_openssl_secure_malloc}
 PC/SC support:           ${enable_pcsc}
 CryptoTokenKit support:  ${enable_cryptotokenkit}
 OpenCT support:          ${enable_openct}
@@ -1080,12 +1131,13 @@ CT-API support:          ${enable_ctapi}
 minidriver support:      ${enable_minidriver}
 SM support:              ${enable_sm}
 SM default module:       ${DEFAULT_SM_MODULE}
+SM default path:         $(eval eval eval echo "${DEFAULT_SM_MODULE_PATH}")
 DNIe UI support:         ${enable_dnie_ui}
 Notification support:    ${enable_notify}
-Debug file:              ${DEBUG_FILE}
+Build tests:             ${enable_tests}
 
 PC/SC default provider:  ${DEFAULT_PCSC_PROVIDER}
-PKCS11 default provider: ${DEFAULT_PKCS11_PROVIDER}
+PKCS11 default provider: $(eval eval eval echo "${DEFAULT_PKCS11_PROVIDER}")
 
 Host:                    ${host}
 Compiler:                ${CC}

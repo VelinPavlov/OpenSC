@@ -495,7 +495,7 @@ static int loadCertificate(sc_pkcs15_card_t * p15card, int i,
 	sc_read_binary(card, 4, compCert, compLen, 0);
 
 	if ((r = uncompress(cert, &len, compCert, compLen)) != Z_OK) {
-		sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, "Zlib error: %d", r);
+		sc_log(p15card->card->ctx,  "Zlib error: %d", r);
 		return SC_ERROR_INTERNAL;
 	}
 
@@ -579,7 +579,7 @@ static int infocamere_1400_init(sc_pkcs15_card_t * p15card)
 
 	if ((r = loadCertificate(p15card, 0, certPath[0], certLabel[0])) !=
 			SC_SUCCESS) {
-		sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, "%s", sc_strerror(r));
+		sc_log(p15card->card->ctx,  "%s", sc_strerror(r));
 		return SC_ERROR_WRONG_CARD;
 	}
 
@@ -787,7 +787,7 @@ static int infocamere_detect_card(sc_pkcs15_card_t * p15card)
 	sc_card_t *card = p15card->card;
 
 	/* check if we have the correct card OS */
-	if (strcmp(card->name, "STARCOS SPK 2.3")
+	if (strcmp(card->name, "STARCOS")
 			&& strcmp(card->name, "CardOS M4"))
 		return SC_ERROR_WRONG_CARD;
 	return SC_SUCCESS;

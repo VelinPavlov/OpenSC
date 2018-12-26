@@ -34,6 +34,7 @@
 #include <openssl/crypto.h>     /* for OPENSSL_cleanse */
 #endif
 
+
 #include "internal.h"
 
 #ifdef PACKAGE_VERSION
@@ -41,6 +42,19 @@ static const char *sc_version = PACKAGE_VERSION;
 #else
 static const char *sc_version = "(undef)";
 #endif
+
+#ifdef _WIN32
+#include <windows.h>
+#define PAGESIZE 0
+#else
+#include <sys/mman.h>
+#include <limits.h>
+#include <unistd.h>
+#ifndef PAGESIZE
+#define PAGESIZE 0
+#endif
+#endif
+static size_t page_size = PAGESIZE;
 
 const char *sc_get_version(void)
 {
@@ -578,9 +592,9 @@ void sc_file_dup(sc_file_t **dest, const sc_file_t *src)
 	const sc_acl_entry_t *e;
 	unsigned int op;
 
+	*dest = NULL;
 	if (!sc_file_valid(src))
 		return;
-	*dest = NULL;
 	newf = sc_file_new();
 	if (newf == NULL)
 		return;
@@ -628,7 +642,7 @@ int sc_file_set_sec_attr(sc_file_t *file, const u8 *sec_attr,
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	if (sec_attr == NULL) {
+	if (sec_attr == NULL || sec_attr_len == 0) {
 		if (file->sec_attr != NULL)
 			free(file->sec_attr);
 		file->sec_attr = NULL;
@@ -826,40 +840,57 @@ int _sc_parse_atr(sc_reader_t *reader)
 	return SC_SUCCESS;
 }
 
-void *sc_mem_alloc_secure(sc_context_t *ctx, size_t len)
+static void init_page_size()
 {
-    void *pointer;
-    int locked = 0;
-
-    pointer = calloc(len, sizeof(unsigned char));
-    if (!pointer)
-	return NULL;
-#ifdef HAVE_SYS_MMAN_H
-    /* TODO mprotect */
-    /* Do not swap the memory */
-    if (mlock(pointer, len) >= 0)
-	locked = 1;
-#endif
+	if (page_size == 0) {
 #ifdef _WIN32
-	/* Do not swap the memory */
-	if (VirtualLock(pointer, len) != 0)
-		locked = 1;
+		SYSTEM_INFO system_info;
+		GetSystemInfo(&system_info);
+		page_size = system_info.dwPageSize;
+#else
+		page_size = sysconf(_SC_PAGESIZE);
+		if ((long) page_size < 0) {
+			page_size = 0;
+		}
 #endif
-    if (!locked) {
-	if (ctx->flags & SC_CTX_FLAG_PARANOID_MEMORY) {
-	    sc_do_log (ctx, 0, NULL, 0, NULL, "cannot lock memory, failing allocation because paranoid set");
-	    free (pointer);
-	    pointer = NULL;
-	} else {
-	    sc_do_log (ctx, 0, NULL, 0, NULL, "cannot lock memory, sensitive data may be paged to disk");
 	}
-    }
-    return pointer;
+}
+
+void *sc_mem_secure_alloc(size_t len)
+{
+	void *p;
+
+	init_page_size();
+	if (page_size > 0) {
+		size_t pages = (len + page_size - 1) / page_size;
+		len = pages * page_size;
+	}
+
+	p = malloc(len);
+	if (p == NULL) {
+		return NULL;
+	}
+#ifdef _WIN32
+	VirtualLock(p, len);
+#else
+	mlock(p, len);
+#endif
+
+	return p;
+}
+
+void sc_mem_secure_free(void *ptr, size_t len)
+{
+#ifdef _WIN32
+	VirtualUnlock(ptr, len);
+#else
+	munlock(ptr, len);
+#endif
+	free(ptr);
 }
 
 void sc_mem_clear(void *ptr, size_t len)
 {
-	/* FIXME: Bug in 1.0.0-beta series crashes with 0 length */
 	if (len > 0)   {
 #ifdef ENABLE_OPENSSL
 		OPENSSL_cleanse(ptr, len);
@@ -978,6 +1009,26 @@ unsigned sc_crc32(const unsigned char *value, size_t len)
 
 	crc ^= 0xffffffff;
 	return  crc%0xffff;
+}
+
+const u8 *sc_compacttlv_find_tag(const u8 *buf, size_t len, u8 tag, size_t *outlen)
+{
+	if (buf != NULL) {
+		size_t idx;
+		u8 plain_tag = tag & 0xF0;
+		size_t expected_len = tag & 0x0F;
+
+	        for (idx = 0; idx < len; idx++) {
+			if ((buf[idx] & 0xF0) == plain_tag && idx + expected_len < len &&
+			    (expected_len == 0 || expected_len == (buf[idx] & 0x0F))) {
+				if (outlen != NULL)
+					*outlen = buf[idx] & 0x0F;
+				return buf + (idx + 1);
+			}
+			idx += (buf[idx] & 0x0F);
+                }
+        }
+	return NULL;
 }
 
 /**************************** mutex functions ************************/

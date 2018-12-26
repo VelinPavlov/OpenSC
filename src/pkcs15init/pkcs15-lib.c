@@ -175,6 +175,7 @@ static struct sc_pkcs15init_callbacks callbacks = {
 	NULL,
 };
 
+
 static void sc_pkcs15init_empty_callback(void *ptr)
 {
 }
@@ -734,8 +735,8 @@ sc_pkcs15init_finalize_profile(struct sc_card *card, struct sc_profile *profile,
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	if (card->app_count < 0)
-		sc_enum_apps(card);
+	if (card->app_count < 0 && SC_SUCCESS != sc_enum_apps(card))
+		sc_log(ctx, "Could not enumerate apps");
 
 	if (aid)   {
 		sc_log(ctx, "finalize profile for AID %s", sc_dump_hex(aid->value, aid->len));
@@ -770,6 +771,7 @@ sc_pkcs15init_add_app(struct sc_card *card, struct sc_profile *profile,
 	struct sc_app_info	*app;
 	struct sc_file		*df = profile->df_info->file;
 	int			r = SC_SUCCESS;
+	int			has_so_pin = args->so_pin_len != 0;
 
 	LOG_FUNC_CALLED(ctx);
 	p15card->card = card;
@@ -783,13 +785,22 @@ sc_pkcs15init_add_app(struct sc_card *card, struct sc_profile *profile,
 	if (card->app_count >= SC_MAX_CARD_APPS)
 		LOG_TEST_RET(ctx, SC_ERROR_TOO_MANY_OBJECTS, "Too many applications on this card.");
 
+	/* In case of pinpad readers check if SO PIN is defined in a profile */
+	if (!has_so_pin && (card->reader->capabilities & SC_READER_CAP_PIN_PAD)) {
+		sc_profile_get_pin_info(profile, SC_PKCS15INIT_SO_PIN, &pin_ainfo);
+		/* If found, assume we want SO PIN */
+		has_so_pin = pin_ainfo.attrs.pin.reference != -1;
+	}
+
 	/* If the profile requires an SO PIN, check min/max length */
-	if (args->so_pin_len) {
+	if (has_so_pin) {
 		const char	*pin_label;
 
-		sc_profile_get_pin_info(profile, SC_PKCS15INIT_SO_PIN, &pin_ainfo);
-		r = sc_pkcs15init_qualify_pin(card, "SO PIN", args->so_pin_len, &pin_ainfo);
-		LOG_TEST_RET(ctx, r, "Failed to qualify SO PIN");
+		if (args->so_pin_len) {
+			sc_profile_get_pin_info(profile, SC_PKCS15INIT_SO_PIN, &pin_ainfo);
+			r = sc_pkcs15init_qualify_pin(card, "SO PIN", args->so_pin_len, &pin_ainfo);
+			LOG_TEST_RET(ctx, r, "Failed to qualify SO PIN");
+		}
 
 		/* Path encoded only for local SO PIN */
 		if (pin_attrs->flags & SC_PKCS15_PIN_FLAG_LOCAL)
@@ -1210,11 +1221,11 @@ sc_pkcs15init_init_prkdf(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 	key_info->key_reference = 0;
 	key_info->modulus_length = keybits;
 	key_info->access_flags = keyargs->access_flags;
+	object->user_consent = keyargs->user_consent;
 	/* Path is selected below */
 
 	if (keyargs->access_flags & SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE) {
 		key_info->access_flags &= ~SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE;
-		key_info->native = 0;
 	}
 
 	/* Select a Key ID if the user didn't specify one,
@@ -1329,13 +1340,16 @@ sc_pkcs15init_init_skdf(struct sc_pkcs15_card *p15card, struct sc_profile *profi
 	key_info->key_reference = 0;
 	switch (keyargs->algorithm) {
 	case SC_ALGORITHM_DES:
-		key_info->key_type = CKM_DES_ECB;
+		key_info->key_type = CKK_DES;
 		break;
 	case SC_ALGORITHM_3DES:
-		key_info->key_type = CKM_DES3_ECB;
+		key_info->key_type = CKK_DES3;
 		break;
 	case SC_ALGORITHM_AES:
-		key_info->key_type = CKM_AES_ECB;
+		key_info->key_type = CKK_AES;
+		break;
+	default:
+		key_info->key_type = CKK_GENERIC_SECRET;
 		break;
 	}
 	key_info->value_len = keybits;
@@ -1344,8 +1358,12 @@ sc_pkcs15init_init_skdf(struct sc_pkcs15_card *p15card, struct sc_profile *profi
 
 	if (keyargs->access_flags & SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE) {
 		key_info->access_flags &= ~SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE;
-		key_info->native = 0;
 	}
+
+	if (keyargs->session_object > 0)
+	    object->session_object = 1;
+
+	object->user_consent = keyargs->user_consent;
 
 	/* Select a Key ID if the user didn't specify one,
 	 * otherwise make sure it's compatible with our intended use */
@@ -1451,7 +1469,7 @@ sc_pkcs15init_generate_key(struct sc_pkcs15_card *p15card, struct sc_profile *pr
 
 	if (check_key_compatibility(p15card, keygen_args->prkey_args.key.algorithm,
 			&keygen_args->prkey_args.key, keygen_args->prkey_args.x509_usage,
-			keybits, SC_ALGORITHM_ONBOARD_KEY_GEN))
+			keybits, SC_ALGORITHM_ONBOARD_KEY_GEN) != SC_SUCCESS)
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Cannot generate key with the given parameters");
 
 	if (profile->ops->generate_key == NULL)
@@ -1575,7 +1593,7 @@ sc_pkcs15init_generate_secret_key(struct sc_pkcs15_card *p15card, struct sc_prof
 	LOG_TEST_RET(ctx, r, "Invalid key size");
 
 	if (check_key_compatibility(p15card, skey_args->algorithm, NULL, 0,
-			keybits, SC_ALGORITHM_ONBOARD_KEY_GEN))
+			keybits, SC_ALGORITHM_ONBOARD_KEY_GEN) != SC_SUCCESS)
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Cannot generate key with the given parameters");
 
 	if (profile->ops->generate_key == NULL)
@@ -1644,11 +1662,11 @@ sc_pkcs15init_store_private_key(struct sc_pkcs15_card *p15card, struct sc_profil
 	LOG_TEST_RET(ctx, keybits, "Invalid private key size");
 
 	/* Now check whether the card is able to handle this key */
-	if (check_key_compatibility(p15card, key.algorithm, &key, keyargs->x509_usage, keybits, 0)) {
+	if (check_key_compatibility(p15card, key.algorithm, &key, keyargs->x509_usage, keybits, 0) != SC_SUCCESS) {
 		/* Make sure the caller explicitly tells us to store
 		 * the key as extractable. */
 		if (!(keyargs->access_flags & SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE))
-			LOG_TEST_RET(ctx, SC_ERROR_INCOMPATIBLE_KEY, "Card does not support this key.");
+			LOG_TEST_RET(ctx, SC_ERROR_INCOMPATIBLE_KEY, "Card does not support this key for crypto. Cannot store it as non extractable.");
 	}
 
 	/* Select a intrinsic Key ID if user didn't specify one */
@@ -1877,11 +1895,11 @@ sc_pkcs15init_store_secret_key(struct sc_pkcs15_card *p15card, struct sc_profile
 	LOG_FUNC_CALLED(ctx);
 
 	/* Now check whether the card is able to handle this key */
-	if (check_key_compatibility(p15card, keyargs->algorithm, NULL, 0, keyargs->key.data_len * 8, 0)) {
+	if (check_key_compatibility(p15card, keyargs->algorithm, NULL, 0, keyargs->value_len, 0) != SC_SUCCESS) {
 		/* Make sure the caller explicitly tells us to store
 		 * the key as extractable. */
 		if (!(keyargs->access_flags & SC_PKCS15_PRKEY_ACCESS_EXTRACTABLE))
-			LOG_TEST_RET(ctx, SC_ERROR_INCOMPATIBLE_KEY, "Card does not support this key.");
+			LOG_TEST_RET(ctx, SC_ERROR_INCOMPATIBLE_KEY, "Card does not support this key for crypto. Cannot store it as non extractable.");
 	}
 
 #ifdef ENABLE_OPENSSL
@@ -1908,22 +1926,32 @@ sc_pkcs15init_store_secret_key(struct sc_pkcs15_card *p15card, struct sc_profile
 		r = profile->ops->create_key(profile, p15card, object);
 	LOG_TEST_RET(ctx, r, "Card specific 'create key' failed");
 
-	if (profile->ops->store_key) {
-		struct sc_pkcs15_prkey key;
-		memset(&key, 0, sizeof(key));
-		key.algorithm = keyargs->algorithm;
-		key.u.secret = keyargs->key;
-		r = profile->ops->store_key(profile, p15card, object, &key);
+	/* If no key data, only an empty EF is created. 
+	 * It can be used to receive an unwrapped key later. */
+	if (keyargs->key.data_len > 0) {
+		if (profile->ops->store_key) {
+			struct sc_pkcs15_prkey key;
+			memset(&key, 0, sizeof(key));
+			key.algorithm = keyargs->algorithm;
+			key.u.secret = keyargs->key;
+			r = profile->ops->store_key(profile, p15card, object, &key);
+		}
 	}
 	LOG_TEST_RET(ctx, r, "Card specific 'store key' failed");
 
 	sc_pkcs15_free_object_content(object);
 
-	/* Now update the SKDF */
-	r = sc_pkcs15init_add_object(p15card, profile, SC_PKCS15_SKDF, object);
-	LOG_TEST_RET(ctx, r, "Failed to add new secret key PKCS#15 object");
+	/* Now update the SKDF, unless it is a session object.
+	   If we have an on card session object, we have created the actual key object on card.
+	   The card handles removing it when the session is finished or during the next reset.
+	   We will maintain the object in the P15 structure in memory for duration of the session,
+	   but we don't want it to be written into SKDF. */
+	if (!object->session_object) {
+		r = sc_pkcs15init_add_object(p15card, profile, SC_PKCS15_SKDF, object);
+		LOG_TEST_RET(ctx, r, "Failed to add new secret key PKCS#15 object");
+	}
 
-	if (!r && profile->ops->emu_store_data)   {
+	if (!r && profile->ops->emu_store_data && !object->session_object)   {
 		r = profile->ops->emu_store_data(p15card, profile, object, NULL, NULL);
 		if (r == SC_ERROR_NOT_IMPLEMENTED)
 			r = SC_SUCCESS;
@@ -1937,7 +1965,6 @@ sc_pkcs15init_store_secret_key(struct sc_pkcs15_card *p15card, struct sc_profile
 
 	LOG_FUNC_RETURN(ctx, r);
 }
-
 
 /*
  * Store a certificate
@@ -2573,6 +2600,7 @@ key_pkcs15_algo(struct sc_pkcs15_card *p15card, unsigned int algorithm)
 	case SC_ALGORITHM_3DES:
 		return SC_PKCS15_TYPE_SKEY_3DES;
 	case SC_ALGORITHM_AES:
+	case SC_ALGORITHM_UNDEFINED:
 		return SC_PKCS15_TYPE_SKEY_GENERIC;
 	}
 	sc_log(ctx, "Unsupported key algorithm.");
@@ -3303,8 +3331,45 @@ sc_pkcs15init_change_attrib(struct sc_pkcs15_card *p15card, struct sc_profile *p
 			LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Cannot change ID attribute");
 		}
 		break;
+	case P15_ATTR_TYPE_VALUE:
+		switch(df_type) {
+		case SC_PKCS15_DODF: {
+			u8 *nv;
+			struct sc_pkcs15_data_info *info = (struct sc_pkcs15_data_info *) object->data;
+			struct sc_path old_data_path = info->path;
+			struct sc_path new_data_path;
+			struct sc_pkcs15_der new_data;
+			new_data.len = new_len;
+			new_data.value = (u8 *) new_value;
+			
+			/* save new data as a new data file on token */
+			r = sc_pkcs15init_store_data(p15card, profile, object, &new_data, &new_data_path);
+			profile->dirty = 1;
+			LOG_TEST_RET(ctx, r, "Failed to store new data");
+
+			nv = (u8 *) malloc (new_len * sizeof(u8));
+			if (!nv) {
+				LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+			}
+			memcpy(nv, new_value, new_len * sizeof(u8));
+			free(info->data.value);
+			/*  set object members to represent new CKA_VALUE value,
+				new path will be written to DODF later in this function*/
+			info->data.len = new_len;
+			info->data.value = nv;
+			info->path = new_data_path;
+			
+			/* delete old data file from token */
+			r = sc_pkcs15init_delete_by_path(profile, p15card, &old_data_path);
+			LOG_TEST_RET(ctx, r, "Failed to delete old data");
+			break;
+		}
+		default:
+			LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Cannot change value attribute");
+		}
+		break;
 	default:
-		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Only 'LABEL' or 'ID' attributes can be changed");
+		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Only 'LABEL' or 'ID' or 'VALUE'(for data objects) attributes can be changed");
 	}
 
 	if (profile->ops->emu_update_any_df)   {
@@ -3666,12 +3731,12 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 	if (path && path->len)   {
 		struct sc_path tmp_path = *path;
 		int iter;
-
 		r = SC_ERROR_OBJECT_NOT_FOUND;
-		for (iter = tmp_path.len/2; iter >= 0 && r == SC_ERROR_OBJECT_NOT_FOUND; iter--, tmp_path.len -= 2)
+		for (iter = tmp_path.len/2; iter >= 0 && r == SC_ERROR_OBJECT_NOT_FOUND; iter--, tmp_path.len -= 2) {
 			r = sc_pkcs15_find_pin_by_type_and_reference(p15card,
 					tmp_path.len ? &tmp_path : NULL,
 					type, reference, &pin_obj);
+		}
 	}
 	else {
 		r = sc_pkcs15_find_pin_by_type_and_reference(p15card, NULL, type, reference, &pin_obj);
@@ -3736,7 +3801,7 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 
 found:
 	if (pin_obj)   {
-		r = sc_pkcs15_verify_pin(p15card, pin_obj, pinsize ? pinbuf : NULL, pinsize);
+		r = sc_pkcs15_verify_pin(p15card, pin_obj, use_pinpad ? NULL : pinbuf, use_pinpad ? 0 : pinsize);
 		LOG_TEST_RET(ctx, r, "Cannot validate pkcs15 PIN");
 	}
 
@@ -3856,7 +3921,7 @@ do_select_parent(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 		r = sc_select_file(p15card->card, &path, NULL);
 		LOG_TEST_RET(ctx, r, "Cannot select parent DF");
 	}
-	else if (r == SC_SUCCESS && !strcmp(p15card->card->name, "STARCOS SPK 2.3")) {
+	else if (r == SC_SUCCESS && !strcmp(p15card->card->name, "STARCOS")) {
 		/* in case of starcos spk 2.3 SELECT FILE does not
 		 * give us the ACLs => ask the profile */
 		sc_file_free(*parent);

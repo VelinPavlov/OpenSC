@@ -208,7 +208,7 @@ static int gemsafe_get_cert_len(sc_card_t *card)
 	 * the private key.
 	 */
 	ind = 2; /* skip length */
-	while (ibuf[ind] == 0x01) {
+	while (ibuf[ind] == 0x01 && i < gemsafe_cert_max) {
 		if (ibuf[ind+1] == 0xFE) {
 			gemsafe_prkeys[i].ref = ibuf[ind+4];
 			sc_log(card->ctx, "Key container %d is allocated and uses key_ref %d",
@@ -411,7 +411,7 @@ static int sc_pkcs15emu_gemsafeV1_init( sc_pkcs15_card_t *p15card)
 		 */
 		if ( p15card->card->flags & 0x0F) {
 			key_ref = p15card->card->flags & 0x0F;
-			sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(p15card->card->ctx, 
 				 "Overriding key_ref %d with %d\n",
 				 gemsafe_prkeys[i].ref, key_ref);
 		} else

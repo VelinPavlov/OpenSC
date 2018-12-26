@@ -60,7 +60,8 @@ static int westcos_pkcs15init_create_dir(sc_profile_t *profile,
 	int r;
 
 	/* Create the application DF */
-	sc_pkcs15init_create_file(profile, p15card, df);
+	r = sc_pkcs15init_create_file(profile, p15card, df);
+	if(r) return r;
 
 	r = sc_select_file(p15card->card, &df->path, NULL);
 	if(r) return r;
@@ -226,7 +227,6 @@ static int westcos_pkcs15init_generate_key(sc_profile_t *profile,
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 
-#if OPENSSL_VERSION_NUMBER>=0x00908000L
 	rsa = RSA_new();
 	bn = BN_new();
 	mem = BIO_new(BIO_s_mem());
@@ -239,18 +239,6 @@ static int westcos_pkcs15init_generate_key(sc_profile_t *profile,
 
 	if(!BN_set_word(bn, RSA_F4) ||
 		!RSA_generate_key_ex(rsa, key_info->modulus_length, bn, NULL))
-#else
-	mem = BIO_new(BIO_s_mem());
-
-	if(mem == NULL)
-	{
-		r = SC_ERROR_OUT_OF_MEMORY;
-		goto out;
-	}
-
-	rsa = RSA_generate_key(key_info->modulus_length, RSA_F4, NULL, NULL);
-	if (!rsa)
-#endif
 	{
 		r = SC_ERROR_UNKNOWN;
 		goto out;

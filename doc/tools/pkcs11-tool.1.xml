@@ -444,6 +444,15 @@
 					viewable after a login).</para></listitem>
 				</varlistentry>
 
+                                <varlistentry>
+					<term>
+						<option>--always-auth</option>
+					</term>
+					<listitem><para>Set the CKA_ALWAYS_AUTHENTICATE attribute to a private key object.
+                                        If set, the user has to supply the PIN for each use (sign or decrypt) with the key.</para>
+                                        </listitem>
+				</varlistentry>
+
 				<varlistentry>
 					<term>
 						<option>--test-ec</option>
@@ -479,6 +488,13 @@
 					OpenSC debugging level! To set OpenSC PKCS#11 module into debug
 					mode, set the <varname>OPENSC_DEBUG</varname> environment variable to a
 					non-zero number.</para></listitem>
+				</varlistentry>
+
+				<varlistentry>
+					<term>
+						<option>--verify</option>,
+					</term>
+					<listitem><para>Verify signature of some data.</para></listitem>
 				</varlistentry>
 
 				<varlistentry>
@@ -532,6 +548,13 @@
 
 				<varlistentry>
 					<term>
+						<option>--signature-file</option> <replaceable>filename</replaceable>
+					</term>
+					<listitem><para>The path to the signature file for signature verification</para></listitem>
+				</varlistentry>
+
+				<varlistentry>
+					<term>
 						<option>--signature-format</option> <replaceable>format</replaceable>
 					</term>
 					<listitem><para>Format for ECDSA signature: 'rs' (default),
@@ -568,7 +591,7 @@
 
 			To read the certificate with ID <replaceable>KEY_ID</replaceable>
 			in DER format from smart card:
-				<programlisting>pkcs11-tool --read-object  --id KEY_ID --type cert --outfile cert.der</programlisting>
+				<programlisting>pkcs11-tool --read-object  --id KEY_ID --type cert --output-file cert.der</programlisting>
 
 			To convert the certificate in DER format to PEM format, use OpenSSL
 			tools:
@@ -579,6 +602,12 @@
 			using the RSA-PKCS mechanism:
 				<programlisting>pkcs11-tool --sign --id ID --mechanism RSA-PKCS --input-file data --output-file data.sig</programlisting>
 		</para>
+	</refsect1>
+
+	<refsect1>
+		<title>Authors</title>
+		<para><command>pkcs11-tool</command> was written by
+		Olaf Kirch <email>okir@suse.de</email>.</para>
 	</refsect1>
 
 </refentry>

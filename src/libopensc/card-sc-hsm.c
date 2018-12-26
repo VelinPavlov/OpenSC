@@ -60,10 +60,12 @@ struct sc_aid sc_hsm_aid = { { 0xE8,0x2B,0x06,0x01,0x04,0x01,0x81,0xC3,0x1F,0x02
 
 
 /* Known ATRs for SmartCard-HSMs */
-static struct sc_atr_table sc_hsm_atrs[] = {
+static const struct sc_atr_table sc_hsm_atrs[] = {
 	/* standard version */
 	{"3B:FE:18:00:00:81:31:FE:45:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:FA", NULL, NULL, SC_CARD_TYPE_SC_HSM, 0, NULL},
 	{"3B:8E:80:01:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:18", NULL, NULL, SC_CARD_TYPE_SC_HSM, 0, NULL},
+	{"3B:DE:18:FF:81:91:FE:1F:C3:80:31:81:54:48:53:4D:31:73:80:21:40:81:07:1C", NULL, NULL, SC_CARD_TYPE_SC_HSM, 0, NULL},
+
 	{"3B:80:80:01:01", NULL, NULL, SC_CARD_TYPE_SC_HSM_SOC, 0, NULL},	// SoC Sample Card
 	{
 		"3B:84:80:01:47:6f:49:44:00",
@@ -225,10 +227,24 @@ static int sc_hsm_select_file(sc_card_t *card,
 
 
 
+static int sc_hsm_get_challenge(struct sc_card *card, unsigned char *rnd, size_t len)
+{
+	LOG_FUNC_CALLED(card->ctx);
+
+	if (len > 1024) {
+		len = 1024;
+	}
+
+	LOG_FUNC_RETURN(card->ctx, iso_ops->get_challenge(card, rnd, len));
+}
+
+
+
 static int sc_hsm_match_card(struct sc_card *card)
 {
 	sc_path_t path;
 	int i, r, type = 0;
+	sc_file_t *file = NULL;
 
 	i = _sc_match_atr(card, sc_hsm_atrs, &type);
 	if (i >= 0 && type != SC_CARD_TYPE_SC_HSM_SOC) {
@@ -237,8 +253,17 @@ static int sc_hsm_match_card(struct sc_card *card)
 	}
 
 	sc_path_set(&path, SC_PATH_TYPE_DF_NAME, sc_hsm_aid.value, sc_hsm_aid.len, 0, 0);
-	r = sc_hsm_select_file(card, &path, NULL);
+	r = sc_hsm_select_file(card, &path, &file);
 	LOG_TEST_RET(card->ctx, r, "Could not select SmartCard-HSM application");
+
+	// Validate that card returns a FCP with a proprietary tag 85 with value longer than 2 byte (Fixes #1377)
+	if (file != NULL) {
+		i = file->prop_attr_len;
+		sc_file_free(file);
+		if (i < 2) {
+			return 0;
+		}
+	}
 
 	if (type == SC_CARD_TYPE_SC_HSM_SOC) {
 		card->type = SC_CARD_TYPE_SC_HSM_SOC;
@@ -451,6 +476,7 @@ static int sc_hsm_soc_biomatch(sc_card_t *card, struct sc_pin_cmd_data *data,
 
 
 
+#ifdef ENABLE_SM
 #ifdef ENABLE_OPENPACE
 #include "sm/sm-eac.h"
 #include <eac/cv_cert.h>
@@ -572,6 +598,7 @@ static int sc_hsm_perform_chip_authentication(sc_card_t *card)
 {
 	return SC_ERROR_NOT_SUPPORTED;
 }
+#endif
 #endif
 
 
@@ -698,12 +725,12 @@ static int sc_hsm_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 			u8 recvbuf[SC_MAX_APDU_BUFFER_SIZE];
 #ifdef ENABLE_SM
 			if (card->sm_ctx.sm_mode != SM_MODE_TRANSMIT) {
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+				sc_log(card->ctx, 
 						"Session PIN generation only supported in SM");
 				LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 			}
 #else
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx, 
 					"Session PIN generation only supported in SM");
 			LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 #endif
@@ -714,7 +741,7 @@ static int sc_hsm_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 			apdu.le = 0;
 			if (sc_transmit_apdu(card, &apdu) != SC_SUCCESS
 					|| sc_check_sw(card, apdu.sw1, apdu.sw2) != SC_SUCCESS) {
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+				sc_log(card->ctx, 
 						"Generating session PIN failed");
 				LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 			}
@@ -724,12 +751,12 @@ static int sc_hsm_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 							apdu.resplen);
 					data->pin2.len = apdu.resplen;
 				} else {
-					sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+					sc_log(card->ctx, 
 							"Buffer too small for session PIN");
 				}
 			}
 		} else {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx, 
 					"Session PIN not supported for this PIN (0x%02X)",
 					data->pin_reference);
 		}
@@ -765,7 +792,7 @@ static int sc_hsm_read_binary(sc_card_t *card,
 	int r;
 
 	if (idx > 0xffff) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "invalid EF offset: 0x%X > 0xFFFF", idx);
+		sc_log(ctx,  "invalid EF offset: 0x%X > 0xFFFF", idx);
 		return SC_ERROR_OFFSET_TOO_LARGE;
 	}
 
@@ -807,7 +834,7 @@ static int sc_hsm_write_ef(sc_card_t *card,
 	int r;
 
 	if (idx > 0xffff) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "invalid EF offset: 0x%X > 0xFFFF", idx);
+		sc_log(ctx,  "invalid EF offset: 0x%X > 0xFFFF", idx);
 		return SC_ERROR_OFFSET_TOO_LARGE;
 	}
 
@@ -919,7 +946,7 @@ static int sc_hsm_delete_file(sc_card_t *card, const sc_path_t *path)
 	int r;
 
 	if ((path->type != SC_PATH_TYPE_FILE_ID) || (path->len != 2)) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "File type has to be SC_PATH_TYPE_FILE_ID");
+		sc_log(card->ctx,  "File type has to be SC_PATH_TYPE_FILE_ID");
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
@@ -959,6 +986,8 @@ static int sc_hsm_set_security_env(sc_card_t *card,
 			} else {
 				priv->algorithm = ALGO_RSA_PKCS1;
 			}
+		} else if (env->algorithm_flags & SC_ALGORITHM_RSA_PAD_PSS) {
+			priv->algorithm = ALGO_RSA_PSS;
 		} else {
 			if (env->operation == SC_SEC_OPERATION_DECIPHER) {
 				priv->algorithm = ALGO_RSA_DECRYPT;
@@ -1013,8 +1042,12 @@ static int sc_hsm_decode_ecdsa_signature(sc_card_t *card,
 		fieldsizebytes = 32;
 	} else if (datalen <= 90) {		// 320 bit curve = 40 * 2 + 10 byte maximum DER signature
 		fieldsizebytes = 40;
-	} else {
+	} else if (datalen <= 106) {		// 384 bit curve = 48 * 2 + 10 byte maximum DER signature
+		fieldsizebytes = 48;
+	} else if (datalen <= 138) {		// 512 bit curve = 64 * 2 + 10 byte maximum DER signature
 		fieldsizebytes = 64;
+	} else {
+		fieldsizebytes = 66;
 	}
 
 	sc_log(card->ctx,
@@ -1067,8 +1100,7 @@ static int sc_hsm_compute_signature(sc_card_t *card,
 {
 	int r;
 	sc_apdu_t apdu;
-	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
-	u8 sbuf[SC_MAX_APDU_BUFFER_SIZE];
+	u8 rbuf[514];
 	sc_hsm_private_data_t *priv;
 
 	if (card == NULL || data == NULL || out == NULL) {
@@ -1080,19 +1112,13 @@ static int sc_hsm_compute_signature(sc_card_t *card,
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OBJECT_NOT_FOUND);
 	}
 
-	// check if datalen exceeds the buffer size
-	if (datalen > SC_MAX_APDU_BUFFER_SIZE) {
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
-	}
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4, 0x68, priv->env->key_ref[0], priv->algorithm);
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_EXT, 0x68, priv->env->key_ref[0], priv->algorithm);
 	apdu.cla = 0x80;
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
-	apdu.le = 256;
+	apdu.le = 512;
 
-	memcpy(sbuf, data, datalen);
-	apdu.data = sbuf;
+	apdu.data = data;
 	apdu.lc = datalen;
 	apdu.datalen = datalen;
 	r = sc_transmit_apdu(card, &apdu);
@@ -1122,7 +1148,7 @@ static int sc_hsm_decipher(sc_card_t *card, const u8 * crgram, size_t crgram_len
 	int r;
 	size_t len;
 	sc_apdu_t apdu;
-	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
+	u8 rbuf[514];
 	sc_hsm_private_data_t *priv;
 
 	if (card == NULL || crgram == NULL || out == NULL) {
@@ -1131,11 +1157,11 @@ static int sc_hsm_decipher(sc_card_t *card, const u8 * crgram, size_t crgram_len
 	LOG_FUNC_CALLED(card->ctx);
 	priv = (sc_hsm_private_data_t *) card->drv_data;
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_4, 0x62, priv->env->key_ref[0], priv->algorithm);
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_4_EXT, 0x62, priv->env->key_ref[0], priv->algorithm);
 	apdu.cla = 0x80;
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
-	apdu.le = 256;
+	apdu.le = 512;
 
 	apdu.data = (u8 *)crgram;
 	apdu.lc = crgram_len;
@@ -1207,7 +1233,7 @@ static int sc_hsm_initialize(sc_card_t *card, sc_cardctl_sc_hsm_init_param_t *pa
 	int r;
 	size_t tilen;
 	sc_apdu_t apdu;
-	u8 ibuff[50], *p;
+	u8 ibuff[50+0xFF], *p;
 
 	LOG_FUNC_CALLED(card->ctx);
 
@@ -1330,7 +1356,7 @@ static int sc_hsm_wrap_key(sc_card_t *card, sc_cardctl_sc_hsm_wrapped_key_t *par
 {
 	sc_context_t *ctx = card->ctx;
 	sc_apdu_t apdu;
-	u8 data[MAX_EXT_APDU_LENGTH];
+	u8 data[1500];
 	int r;
 
 	LOG_FUNC_CALLED(card->ctx);
@@ -1501,7 +1527,7 @@ static int sc_hsm_init_pin(sc_card_t *card, sc_cardctl_pkcs11_init_pin_t *params
 
 static int sc_hsm_generate_keypair(sc_card_t *card, sc_cardctl_sc_hsm_keygen_info_t *keyinfo)
 {
-	u8 rbuf[1024];
+	u8 rbuf[1200];
 	int r;
 	sc_apdu_t apdu;
 
@@ -1582,11 +1608,13 @@ static int sc_hsm_init(struct sc_card *card)
 		card->drv_data = priv;
 	}
 
-	flags = SC_ALGORITHM_RSA_RAW|SC_ALGORITHM_ONBOARD_KEY_GEN;
+	flags = SC_ALGORITHM_RSA_RAW|SC_ALGORITHM_RSA_PAD_PSS|SC_ALGORITHM_ONBOARD_KEY_GEN;
 
 	_sc_card_add_rsa_alg(card, 1024, flags, 0);
 	_sc_card_add_rsa_alg(card, 1536, flags, 0);
 	_sc_card_add_rsa_alg(card, 2048, flags, 0);
+	_sc_card_add_rsa_alg(card, 3072, flags, 0);
+	_sc_card_add_rsa_alg(card, 4096, flags, 0);
 
 	flags = SC_ALGORITHM_ECDSA_RAW|
 		SC_ALGORITHM_ECDH_CDH_RAW|
@@ -1605,6 +1633,9 @@ static int sc_hsm_init(struct sc_card *card)
 	_sc_card_add_ec_alg(card, 224, flags, ext_flags, NULL);
 	_sc_card_add_ec_alg(card, 256, flags, ext_flags, NULL);
 	_sc_card_add_ec_alg(card, 320, flags, ext_flags, NULL);
+	_sc_card_add_ec_alg(card, 384, flags, ext_flags, NULL);
+	_sc_card_add_ec_alg(card, 512, flags, ext_flags, NULL);
+	_sc_card_add_ec_alg(card, 521, flags, ext_flags, NULL);
 
 	card->caps |= SC_CARD_CAP_RNG|SC_CARD_CAP_APDU_EXT|SC_CARD_CAP_ISO7816_PIN_INFO;
 
@@ -1637,8 +1668,8 @@ static int sc_hsm_init(struct sc_card *card)
 		if (file->prop_attr[1] & 0x04) {
 			card->caps |= SC_CARD_CAP_SESSION_PIN;
 		}
-		sc_file_free(file);
 	}
+	sc_file_free(file);
 
 	card->max_send_size = 1431;		// 1439 buffer size - 8 byte TLV because of odd ins in UPDATE BINARY
 	if (card->type == SC_CARD_TYPE_SC_HSM_SOC
@@ -1682,10 +1713,6 @@ static int sc_hsm_finish(sc_card_t * card)
 	free(priv->EF_C_DevAut);
 	free(priv);
 
-#ifdef ENABLE_OPENPACE
-	EAC_cleanup();
-#endif
-
 	return SC_SUCCESS;
 }
 
@@ -1701,6 +1728,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	sc_hsm_ops                   = *iso_drv->ops;
 	sc_hsm_ops.match_card        = sc_hsm_match_card;
 	sc_hsm_ops.select_file       = sc_hsm_select_file;
+	sc_hsm_ops.get_challenge     = sc_hsm_get_challenge;
 	sc_hsm_ops.read_binary       = sc_hsm_read_binary;
 	sc_hsm_ops.update_binary     = sc_hsm_update_binary;
 	sc_hsm_ops.list_files        = sc_hsm_list_files;

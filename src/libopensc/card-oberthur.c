@@ -39,6 +39,7 @@
 #include "internal.h"
 #include "cardctl.h"
 #include "pkcs15.h"
+#include "gp.h"
 
 #define OBERTHUR_PIN_LOCAL	0x80
 #define OBERTHUR_PIN_REFERENCE_USER	0x81
@@ -46,15 +47,7 @@
 #define OBERTHUR_PIN_REFERENCE_SO	0x04
 #define OBERTHUR_PIN_REFERENCE_PUK	0x84
 
-/* keep OpenSSL 0.9.6 users happy ;-) */
-#if OPENSSL_VERSION_NUMBER < 0x00907000L
-#define DES_cblock			des_cblock
-#define DES_key_schedule		des_key_schedule
-#define DES_set_key_unchecked(a,b)	des_set_key_unchecked(a,*b)
-#define DES_ecb_encrypt(a,b,c,d) 	des_ecb_encrypt(a,b,*c,d)
-#endif
-
-static struct sc_atr_table oberthur_atrs[] = {
+static const struct sc_atr_table oberthur_atrs[] = {
 	{ "3B:7D:18:00:00:00:31:80:71:8E:64:77:E3:01:00:82:90:00", NULL,
 			"Oberthur 64k v4/2.1.1", SC_CARD_TYPE_OBERTHUR_64K, 0, NULL },
 	{ "3B:7D:18:00:00:00:31:80:71:8E:64:77:E3:02:00:82:90:00", NULL,
@@ -157,19 +150,10 @@ auth_select_aid(struct sc_card *card)
 	unsigned char apdu_resp[SC_MAX_APDU_BUFFER_SIZE];
 	struct auth_private_data *data =  (struct auth_private_data *) card->drv_data;
 	int rv, ii;
-	unsigned char cm[7] = {0xA0,0x00,0x00,0x00,0x03,0x00,0x00};
 	struct sc_path tmp_path;
 
 	/* Select Card Manager (to deselect previously selected application) */
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xA4, 0x04, 0x0C);
-	apdu.lc = sizeof(cm);
-	/* apdu.le = sizeof(cm)+4; */
-	apdu.data = cm;
-	apdu.datalen = sizeof(cm);
-	apdu.resplen = sizeof(apdu_resp);
-	apdu.resp = apdu_resp;
-
-	rv = sc_transmit_apdu(card, &apdu);
+	rv = gp_select_card_manager(card);
 	LOG_TEST_RET(card->ctx, rv, "APDU transmit failed");
 
 	/* Get smart card serial number */
@@ -483,6 +467,9 @@ auth_select_file(struct sc_card *card, const struct sc_path *in_path,
 	assert(card != NULL && in_path != NULL);
 
 	memcpy(&path, in_path, sizeof(struct sc_path));
+
+	if (!auth_current_df)
+		return SC_ERROR_OBJECT_NOT_FOUND;
 
 	sc_log(card->ctx, "in_path; type=%d, path=%s, out %p",
 			in_path->type, sc_print_path(in_path), file_out);
@@ -1361,7 +1348,7 @@ auth_update_component(struct sc_card *card, struct auth_update_component_info *a
 
 		ctx = EVP_CIPHER_CTX_new();
 		if (ctx == NULL) 
-		    SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL,SC_ERROR_OUT_OF_MEMORY);
+		    LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 
 		p2 = 0;
 		if (args->len == 24)
@@ -2121,6 +2108,10 @@ auth_read_binary(struct sc_card *card, unsigned int offset,
 	bn[1].data = NULL;
 
 	LOG_FUNC_CALLED(card->ctx);
+
+	if (!auth_current_ef)
+		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid auth_current_ef");
+
 	sc_log(card->ctx,
 	       "offset %i; size %"SC_FORMAT_LEN_SIZE_T"u; flags 0x%lX",
 	       offset, count, flags);
