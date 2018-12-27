@@ -1543,7 +1543,7 @@ static int change_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess)
 	char old_buf[21], *old_pin = NULL;
 	char new_buf[21], *new_pin = NULL;
 	CK_TOKEN_INFO	info;
-	CK_RV rv;
+	CK_RV rv,rvl;
 	int r;
 	size_t		len = 0;
 
@@ -1590,9 +1590,26 @@ static int change_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess)
 		}
 	}
 
+
 	rv = p11->C_SetPIN(sess,
-		(CK_UTF8CHAR *) old_pin, old_pin == NULL ? 0 : strlen(old_pin),
-		(CK_UTF8CHAR *) new_pin, new_pin == NULL ? 0 : strlen(new_pin));
+                (CK_UTF8CHAR *) old_pin, old_pin == NULL ? 0 : strlen(old_pin),
+                (CK_UTF8CHAR *) new_pin, new_pin == NULL ? 0 : strlen(new_pin));
+
+	if (rv == CKR_FUNCTION_NOT_SUPPORTED) { // try to login and change again
+                rvl = p11->C_Login(sess, CKU_USER,
+                        (CK_UTF8CHAR *) old_pin, old_pin == NULL ? 0 : strlen(old_pin));
+		if (rvl != CKR_OK)
+                        p11_fatal("C_Login", rvl);
+		rv = p11->C_SetPIN(sess,
+                (CK_UTF8CHAR *) old_pin, old_pin == NULL ? 0 : strlen(old_pin),
+                (CK_UTF8CHAR *) new_pin, new_pin == NULL ? 0 : strlen(new_pin));
+		rvl = p11->C_Logout(sess);
+		if (rvl != CKR_OK)
+                        p11_fatal("C_Logout", rvl);
+
+	}
+
+
 	if (rv != CKR_OK)
 		p11_fatal("C_SetPIN", rv);
 	printf("PIN successfully changed\n");
