@@ -15,7 +15,6 @@ for T in $TOOLS; do
 		grep -q -- "$S" ${SOURCE_PATH}/doc/tools/${T}.1.xml || { echo "${T}: missing switch $S"; ALL=0; };
 	done
 done
-exit 0
 if [ "$ALL" = 0 ]; then
 	echo "Not all the switches in help are documented in manual pages"
 	exit 1;

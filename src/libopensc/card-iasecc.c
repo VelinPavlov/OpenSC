@@ -74,10 +74,8 @@ static const struct sc_atr_table iasecc_known_atrs[] = {
 	{ "3B:7F:96:00:00:00:31:B8:64:40:70:14:10:73:94:01:80:82:90:00",
 	  "FF:FF:FF:FF:FF:FF:FF:FE:FF:FF:00:00:FF:FF:FF:FF:FF:FF:FF:FF",
 		"IAS/ECC Gemalto", SC_CARD_TYPE_IASECC_GEMALTO,  0, NULL },
-    { "3B:DD:18:00:81:31:FE:45:80:F9:A0:00:00:00:77:01:08:00:07:90:00:FE", NULL,
+        { "3B:DD:18:00:81:31:FE:45:80:F9:A0:00:00:00:77:01:08:00:07:90:00:FE", NULL,
 		"IAS/ECC v1.0.1 Oberthur", SC_CARD_TYPE_IASECC_OBERTHUR,  0, NULL },
-    { "3B:DD:96:00:81:31:FE:45:80:F9:A0:00:00:00:77:01:08:00:07:90:00:70", NULL,
-		"IDEMIA Cosmo ID-One v8.1 R2 IAS/ECC V2", SC_CARD_TYPE_IASECC_OBERTHUR,  0, NULL },
 	{ "3B:7D:13:00:00:4D:44:57:2D:49:41:53:2D:43:41:52:44:32", NULL,
 		"IAS/ECC v1.0.1 Sagem MDW-IAS-CARD2", SC_CARD_TYPE_IASECC_SAGEM,  0, NULL },
 	{ "3B:7F:18:00:00:00:31:B8:64:50:23:EC:C1:73:94:01:80:82:90:00", NULL,
@@ -1846,8 +1844,6 @@ iasecc_chv_verify(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd,
 	struct sc_acl_entry acl = pin_cmd->pin1.acls[IASECC_ACLS_CHV_VERIFY];
 	struct sc_apdu apdu;
 	int rv;
-	
-	unsigned char pinwithpadding[64];
 
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "Verify CHV PIN(ref:%i,len:%i,acl:%X:%X)", pin_cmd->pin_reference, pin_cmd->pin1.len,
@@ -1866,14 +1862,6 @@ iasecc_chv_verify(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd,
 		apdu.data = pin_cmd->pin1.data;
 		apdu.datalen = pin_cmd->pin1.len;
 		apdu.lc = pin_cmd->pin1.len;
-		if (card->type == 25002) { // Idemia IAS-ECC
-			sc_log(ctx, "Forcing padded pin length for card (%i)", card->type);
-            		memset(pinwithpadding, 0xFF, sizeof(pinwithpadding));
-            		memcpy(pinwithpadding, pin_cmd->pin1.data, pin_cmd->pin1.len);
-            		apdu.data = pinwithpadding;
-            		apdu.datalen = sizeof(pinwithpadding);
-            		apdu.lc = sizeof(pinwithpadding);
-		}
 	}
 	else if ((card->reader->capabilities & SC_READER_CAP_PIN_PAD) && !pin_cmd->pin1.data && !pin_cmd->pin1.len)   {
 		rv = iasecc_chv_verify_pinpad(card, pin_cmd, tries_left);
@@ -2219,15 +2207,8 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 			se.reference = acl->key_ref;
 
 			rv = iasecc_se_get_info(card, &se);
-#if 0
 			LOG_TEST_GOTO_ERR(ctx, rv, "SDO get data error");
-#else
-            if (rv)   {
-				acl->method = SC_AC_NEVER;
-                continue;
-            }
-#endif
-        }
+		}
 
 		if (scb & IASECC_SCB_METHOD_USER_AUTH)   {
 			rv = iasecc_se_get_crt_by_usage(card, &se,
@@ -2352,8 +2333,8 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	struct sc_apdu apdu;
 	unsigned reference = data->pin_reference;
 	unsigned char pin_data[0x100];
-	unsigned char pin_padded[64]; // Idemia pin1 padded length (pin2 padded length is 64 too)
 	int rv;
+
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "Change PIN(ref:%i,type:0x%X,lengths:%i/%i)", reference, data->pin_type, data->pin1.len, data->pin2.len);
 
@@ -2377,21 +2358,15 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 
 	if ((unsigned)(data->pin1.len + data->pin2.len) > sizeof(pin_data))
 		LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "Buffer too small for the 'Change PIN' data");
-	
+
 	if (data->pin1.data)
 		memcpy(pin_data, data->pin1.data, data->pin1.len);
 	if (data->pin2.data)
 		memcpy(pin_data + data->pin1.len, data->pin2.data, data->pin2.len);
+
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x24, 0, reference);
-	apdu.datalen = data->pin1.len + data->pin2.len;
-	if (card->type == 25002) { // Idemia IAS-ECC
-		sc_log(ctx, "Forcing pins length to be padded for card (%i)", card->type);
-		memset (pin_data,0xFF,sizeof(pin_data));
-		memcpy(pin_data, data->pin1.data, data->pin1.len);
-		memcpy(pin_data + sizeof(pin_padded), data->pin2.data, data->pin2.len);
-		apdu.datalen = sizeof(pin_padded)*2;
-	}
 	apdu.data = pin_data;
+	apdu.datalen = data->pin1.len + data->pin2.len;
 	apdu.lc = apdu.datalen;
 
 	rv = sc_transmit_apdu(card, &apdu);
@@ -2522,24 +2497,13 @@ iasecc_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_le
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "iasecc_pin_cmd() cmd 0x%X, flags 0x%X, PIN type 0x%X, PIN reference %i, PIN-1 %p:%i:%li, PIN-2 %p:%i:%li",
-			data->cmd, data->flags, data->pin_type, data->pin_reference,
-			data->pin1.data, data->pin1.len, data->pin1.pad_length,
-            data->pin2.data, data->pin2.len, data->pin2.pad_length);
+	sc_log(ctx, "iasecc_pin_cmd() cmd 0x%X, PIN type 0x%X, PIN reference %i, PIN-1 %p:%i, PIN-2 %p:%i",
+			data->cmd, data->pin_type, data->pin_reference,
+			data->pin1.data, data->pin1.len, data->pin2.data, data->pin2.len);
 
 	switch (data->cmd)   {
 	case SC_PIN_CMD_VERIFY:
-        if (((data->flags & SC_PIN_CMD_NEED_PADDING)) != 0 && (data->pin1.pad_length > (size_t)data->pin1.len))    {
-            unsigned char pin_data[256];
-            size_t pin_len = data->pin1.pad_length;
-
-            memcpy(pin_data, data->pin1.data, data->pin1.len);
-            memset(pin_data + data->pin1.len, data->pin1.pad_char, pin_len - data->pin1.len);
-		    rv = iasecc_pin_verify(card, data->pin_type, data->pin_reference, pin_data, pin_len, tries_left);
-        }
-        else   {
-		    rv = iasecc_pin_verify(card, data->pin_type, data->pin_reference, data->pin1.data, data->pin1.len, tries_left);
-        }
+		rv = iasecc_pin_verify(card, data->pin_type, data->pin_reference, data->pin1.data, data->pin1.len, tries_left);
 		break;
 	case SC_PIN_CMD_CHANGE:
 		if (data->pin_type == SC_AC_AUT)
