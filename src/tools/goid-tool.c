@@ -317,17 +317,13 @@ int soc_main(struct sc_context *ctx, sc_card_t *card, struct gengetopt_args_info
     if (file && file->prop_attr && file->prop_attr_len) {
         size_t prop_len = 0;
         const u8 *prop = sc_asn1_find_tag(ctx, file->prop_attr,
-                file->prop_attr_len, 0xA5, &prop_len);
-        if (prop && prop_len) {
-            prop = sc_asn1_find_tag(ctx, prop,
-                    prop_len, 0x81, &prop_len);
-            if (prop && prop_len == 2) {
-                soc_manager_major = prop[0];
-                soc_manager_minor = prop[1];
-                sc_debug(ctx, SC_LOG_DEBUG_VERBOSE_TOOL,
-                        "SoCManager version %u.%u",
-                        soc_manager_major, soc_manager_minor);
-            }
+                file->prop_attr_len, 0x81, &prop_len);
+        if (prop && prop_len == 2) {
+            soc_manager_major = prop[0];
+            soc_manager_minor = prop[1];
+            sc_debug(ctx, SC_LOG_DEBUG_VERBOSE_TOOL,
+                    "SoCManager version %u.%u",
+                    soc_manager_major, soc_manager_minor);
         }
     }
 
@@ -465,9 +461,9 @@ paccess_get_security_attributes(struct sc_context *ctx, const char *ac, int* cha
     int ok = 0;
     memset(sec_attr, 0, 2);
     if (!ac || 0 == strcmp(ac, "never")) {
-        /* nothing else to do */
-    } else if (0 == strcmp(ac, "always")) {
         sec_attr[0] |= 0xFF;
+    } else if (0 == strcmp(ac, "always")) {
+        /* nothing else to do */
     } else {
         size_t i;
         if (0 == strcmp(ac, "ta")) {
