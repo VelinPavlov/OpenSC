@@ -60,6 +60,7 @@
 #include "libopensc/asn1.h"
 #include "common/compat_strlcat.h"
 #include "common/compat_strlcpy.h"
+#include "common/libpkcs11.h"
 #include "util.h"
 #include "libopensc/sc-ossl-compat.h"
 
@@ -69,8 +70,6 @@
 #endif
 #endif
 
-extern void *C_LoadModule(const char *name, CK_FUNCTION_LIST_PTR_PTR);
-extern CK_RV C_UnloadModule(void *module);
 #ifndef ENABLE_SHARED
 extern CK_FUNCTION_LIST pkcs11_function_list;
 #endif
@@ -118,6 +117,10 @@ static struct ec_curve_info {
 	{NULL, NULL, NULL, 0},
 };
 
+static const struct sc_aid GOST_HASH2001_PARAMSET_OID = { { 0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x1e, 0x01 }, 9 };
+static const struct sc_aid GOST_HASH2012_256_PARAMSET_OID = { { 0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x02 }, 10 };
+static const struct sc_aid GOST_HASH2012_512_PARAMSET_OID = { { 0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x03 }, 10 };
+
 enum {
 	OPT_MODULE = 0x100,
 	OPT_SLOT,
@@ -155,7 +158,9 @@ enum {
 	OPT_SALT,
 	OPT_VERIFY,
 	OPT_SIGNATURE_FILE,
-	OPT_ALWAYS_AUTH
+	OPT_ALWAYS_AUTH,
+	OPT_ALLOWED_MECHANISMS,
+	OPT_OBJECT_INDEX
 };
 
 static const struct option options[] = {
@@ -206,6 +211,7 @@ static const struct option options[] = {
 	{ "slot",		1, NULL,		OPT_SLOT },
 	{ "slot-description",	1, NULL,		OPT_SLOT_DESCRIPTION },
 	{ "slot-index",		1, NULL,		OPT_SLOT_INDEX },
+	{ "object-index",		1, NULL,		OPT_OBJECT_INDEX },
 	{ "token-label",	1, NULL,		OPT_TOKEN_LABEL },
 	{ "set-id",		1, NULL,		'e' },
 	{ "attr-from",		1, NULL,		OPT_ATTR_FROM },
@@ -213,6 +219,7 @@ static const struct option options[] = {
 	{ "signature-file",	1, NULL,		OPT_SIGNATURE_FILE },
 	{ "output-file",	1, NULL,		'o' },
 	{ "signature-format",	1, NULL,		'f' },
+	{ "allowed-mechanisms",	1, NULL,		OPT_ALLOWED_MECHANISMS },
 
 	{ "test",		0, NULL,		't' },
 	{ "test-hotplug",	0, NULL,		OPT_TEST_HOTPLUG },
@@ -261,7 +268,7 @@ static const char *option_help[] = {
 	"Unlock User PIN (without '--login' unlock in logged in session; otherwise '--login-type' has to be 'context-specific')",
 	"Key pair generation",
 	"Key generation",
-	"Specify the type and length of the key to create, for example rsa:1024 or EC:prime256v1 or GOSTR3410:A",
+	"Specify the type and length of the key to create, for example rsa:1024 or EC:prime256v1 or GOSTR3410-2012-256:B",
 	"Specify 'sign' key usage flag (sets SIGN in privkey, sets VERIFY in pubkey)",
 	"Specify 'decrypt' key usage flag (RSA only, set DECRYPT privkey, ENCRYPT in pubkey)",
 	"Specify 'derive' key usage flag (EC only)",
@@ -278,6 +285,7 @@ static const char *option_help[] = {
 	"Specify the ID of the slot to use",
 	"Specify the description of the slot to use",
 	"Specify the index of the slot to use",
+	"Specify the index of the object to use",
 	"Specify the token label of the slot to use",
 	"Set the CKA_ID of an object, <args>= the (new) CKA_ID",
 	"Use <arg> to create some attributes when writing an object",
@@ -285,6 +293,7 @@ static const char *option_help[] = {
 	"Specify the file with signature for verification",
 	"Specify the output file",
 	"Format for ECDSA signature <arg>: 'rs' (default), 'sequence', 'openssl'",
+	"Specify the comma-separated list of allowed mechanisms when creating an object.",
 
 	"Test (best used with the --login or --pin option)",
 	"Test hotplug capabilities (C_GetSlotList + C_WaitForSlotEvent)",
@@ -313,6 +322,8 @@ static const char *	opt_slot_description = NULL;
 static const char *	opt_token_label = NULL;
 static CK_ULONG		opt_slot_index = 0;
 static int		opt_slot_index_set = 0;
+static CK_ULONG		opt_object_index = 0;
+static int		opt_object_index_set = 0;
 static CK_MECHANISM_TYPE opt_mechanism = 0;
 static int		opt_mechanism_used = 0;
 static const char *	opt_file_to_write = NULL;
@@ -332,6 +343,9 @@ static char *		opt_issuer = NULL;
 static char *		opt_subject = NULL;
 static char *		opt_key_type = NULL;
 static char *		opt_sig_format = NULL;
+#define MAX_ALLOWED_MECHANISMS 20
+static CK_MECHANISM_TYPE opt_allowed_mechanisms[MAX_ALLOWED_MECHANISMS];
+static size_t		opt_allowed_mechanisms_len = 0;
 static int		opt_is_private = 0;
 static int		opt_is_sensitive = 0;
 static int		opt_test_hotplug = 0;
@@ -496,7 +510,7 @@ get##ATTR(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj, CK_ULONG_PTR pulCount) \
 		}						\
 		if (pulCount)					\
 			*pulCount = attr.ulValueLen / sizeof(TYPE);	\
-	} else {						\
+	} else if (rv != CKR_ATTRIBUTE_TYPE_INVALID) {		\
 		p11_warn("C_GetAttributeValue(" #ATTR ")", rv);	\
 	}							\
 	return (TYPE *) attr.pValue;				\
@@ -516,6 +530,11 @@ ATTR_METHOD(VERIFY, CK_BBOOL);				/* getVERIFY */
 ATTR_METHOD(WRAP, CK_BBOOL);				/* getWRAP */
 ATTR_METHOD(UNWRAP, CK_BBOOL);				/* getUNWRAP */
 ATTR_METHOD(DERIVE, CK_BBOOL);				/* getDERIVE */
+ATTR_METHOD(SENSITIVE, CK_BBOOL);			/* getSENSITIVE */
+ATTR_METHOD(ALWAYS_SENSITIVE, CK_BBOOL);		/* getALWAYS_SENSITIVE */
+ATTR_METHOD(EXTRACTABLE, CK_BBOOL);			/* getEXTRACTABLE */
+ATTR_METHOD(NEVER_EXTRACTABLE, CK_BBOOL);		/* getNEVER_EXTRACTABLE */
+ATTR_METHOD(LOCAL, CK_BBOOL);				/* getLOCAL */
 ATTR_METHOD(OPENSC_NON_REPUDIATION, CK_BBOOL);		/* getOPENSC_NON_REPUDIATION */
 ATTR_METHOD(KEY_TYPE, CK_KEY_TYPE);			/* getKEY_TYPE */
 ATTR_METHOD(CERTIFICATE_TYPE, CK_CERTIFICATE_TYPE);	/* getCERTIFICATE_TYPE */
@@ -532,8 +551,10 @@ VARATTR_METHOD(PUBLIC_EXPONENT, CK_BYTE);		/* getPUBLIC_EXPONENT */
 #endif
 VARATTR_METHOD(VALUE, unsigned char);			/* getVALUE */
 VARATTR_METHOD(GOSTR3410_PARAMS, unsigned char);	/* getGOSTR3410_PARAMS */
+VARATTR_METHOD(GOSTR3411_PARAMS, unsigned char);	/* getGOSTR3411_PARAMS */
 VARATTR_METHOD(EC_POINT, unsigned char);		/* getEC_POINT */
 VARATTR_METHOD(EC_PARAMS, unsigned char);		/* getEC_PARAMS */
+VARATTR_METHOD(ALLOWED_MECHANISMS, CK_MECHANISM_TYPE);	/* getALLOWED_MECHANISMS */
 
 
 int main(int argc, char * argv[])
@@ -571,6 +592,7 @@ int main(int argc, char * argv[])
 	int do_unlock_pin = 0;
 	int action_count = 0;
 	int do_generate_random = 0;
+	char *s = NULL;
 	CK_RV rv;
 
 #ifdef _WIN32
@@ -792,6 +814,10 @@ int main(int argc, char * argv[])
 			opt_slot_index = (CK_ULONG) strtoul(optarg, NULL, 0);
 			opt_slot_index_set = 1;
 			break;
+		case OPT_OBJECT_INDEX:
+			opt_object_index = (CK_ULONG) strtoul(optarg, NULL, 0);
+			opt_object_index_set = 1;
+			break;
 		case OPT_TOKEN_LABEL:
 			if (opt_slot_set || opt_slot_description || opt_slot_index_set) {
 				fprintf(stderr, "Error: Only one of --slot, --slot-label, --slot-index or --token-label can be used\n");
@@ -895,6 +921,22 @@ int main(int argc, char * argv[])
 			break;
 		case OPT_ALWAYS_AUTH:
 			opt_always_auth = 1;
+			break;
+		case OPT_ALLOWED_MECHANISMS:
+			/* Parse the mechanism list and fail early */
+			s = strtok(optarg, ",");
+			while (s != NULL) {
+				if (opt_allowed_mechanisms_len > MAX_ALLOWED_MECHANISMS) {
+					fprintf(stderr, "Too many mechanisms provided"
+						" (max %d). Skipping the rest.", MAX_ALLOWED_MECHANISMS);
+					break;
+				}
+
+				opt_allowed_mechanisms[opt_allowed_mechanisms_len] =
+					p11_name_to_mechanism(s);
+				opt_allowed_mechanisms_len++;
+				s = strtok(NULL, ",");
+			}
 			break;
 		default:
 			util_print_usage_and_die(app_name, options, option_help, NULL);
@@ -1130,9 +1172,10 @@ int main(int argc, char * argv[])
 		if (opt_object_class_str == NULL)
 			util_fatal("You should specify type of the object to delete");
 		if (opt_object_id_len == 0 && opt_object_label == NULL &&
-				opt_application_label == NULL && opt_application_id == NULL)
+				opt_application_label == NULL && opt_application_id == NULL &&
+				opt_object_index_set == 0)
 			 util_fatal("You should specify at least one of the "
-					 "object ID, object label, application label or application ID");
+					 "object ID, object label, application label, application ID or object index");
 		delete_object(session);
 	}
 
@@ -2186,6 +2229,7 @@ static void hash_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 
 #define FILL_ATTR(attr, typ, val, len) {(attr).type=(typ); (attr).pValue=(val); (attr).ulValueLen=len;}
 
+/* Generate asymmetric key pair */
 static int gen_keypair(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 	CK_OBJECT_HANDLE *hPublicKey, CK_OBJECT_HANDLE *hPrivateKey, const char *type)
 {
@@ -2297,49 +2341,100 @@ static int gen_keypair(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_EC_PARAMS, ecparams, ecparams_size);
 			n_pubkey_attr++;
 		}
-		else if (strncmp(type, "GOSTR3410:", strlen("GOSTR3410:")) == 0 || strncmp(type, "gostr3410:", strlen("gostr3410:")) == 0) {
-			CK_BYTE key_paramset_encoded_oid[9];
-			CK_BYTE hash_paramset_encoded_oid[9];
-			const CK_BYTE GOST_PARAMSET_A_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01};
-			const CK_BYTE GOST_PARAMSET_B_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x02};
-			const CK_BYTE GOST_PARAMSET_C_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x03};
-			const CK_BYTE GOST_HASH_PARAMSET_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x1e, 0x01};
-			unsigned long int  gost_key_type = CKK_GOSTR3410;
-			CK_MECHANISM_TYPE mtypes[] = {CKM_GOSTR3410_KEY_PAIR_GEN};
+		else if (strncmp(type, "GOSTR3410", strlen("GOSTR3410")) == 0 || strncmp(type, "gostr3410", strlen("gostr3410")) == 0) {
+			const struct sc_aid GOST2001_PARAMSET_A_OID = { { 0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01 }, 9 };
+			const struct sc_aid GOST2001_PARAMSET_B_OID = { { 0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x02 }, 9 };
+			const struct sc_aid GOST2001_PARAMSET_C_OID = { { 0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x03 }, 9 };
+			const struct sc_aid GOST2012_256_PARAMSET_A_OID = { { 0x06, 0x09, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x02, 0x01, 0x01, 0x01 }, 11 };
+			const struct sc_aid GOST2012_512_PARAMSET_A_OID = { { 0x06, 0x09, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x02, 0x01, 0x02, 0x01 }, 11 };
+			const struct sc_aid GOST2012_512_PARAMSET_B_OID = { { 0x06, 0x09, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x02, 0x01, 0x02, 0x02 }, 11 };
+			const struct sc_aid GOST2012_512_PARAMSET_C_OID = { { 0x06, 0x09, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x02, 0x01, 0x02, 0x03 }, 11 };
+			struct sc_aid key_paramset_encoded_oid;
+			struct sc_aid hash_paramset_encoded_oid;
+			unsigned long int gost_key_type = -1;
+			CK_MECHANISM_TYPE mtypes[] = {-1};
 			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
-			const char *p_param_set = type + strlen("GOSTR3410:");
-
-			if (!opt_mechanism_used) {
-				if (!find_mechanism(slot, CKF_GENERATE_KEY_PAIR, mtypes, mtypes_num, &opt_mechanism))
-					util_fatal("Generate GOSTR3410 mechanism not supported");
-			}
+			const char *p_param_set = type + strlen("GOSTR3410");
 
 			if (p_param_set == NULL)
 				util_fatal("Unknown key type %s", type);
 
-			if (!strcmp("A", p_param_set)) {
-				memcpy(key_paramset_encoded_oid, GOST_PARAMSET_A_OID, sizeof(GOST_PARAMSET_A_OID));
-				memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
+			if (!strcmp(":A", p_param_set) || !strcmp("-2001:A", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410;
+				mtypes[0] = CKM_GOSTR3410_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2001_PARAMSET_A_OID;
+				hash_paramset_encoded_oid = GOST_HASH2001_PARAMSET_OID;
 			}
-			else if (!strcmp("B", p_param_set)) {
-				memcpy(key_paramset_encoded_oid, GOST_PARAMSET_B_OID, sizeof(GOST_PARAMSET_B_OID));
-				memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
+			else if (!strcmp(":B", p_param_set) || !strcmp("-2001:B", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410;
+				mtypes[0] = CKM_GOSTR3410_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2001_PARAMSET_B_OID;
+				hash_paramset_encoded_oid = GOST_HASH2001_PARAMSET_OID;
 			}
-			else if (!strcmp("C", p_param_set)) {
-				memcpy(key_paramset_encoded_oid, GOST_PARAMSET_C_OID, sizeof(GOST_PARAMSET_C_OID));
-				memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
+			else if (!strcmp(":C", p_param_set) || !strcmp("-2001:C", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410;
+				mtypes[0] = CKM_GOSTR3410_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2001_PARAMSET_C_OID;
+				hash_paramset_encoded_oid = GOST_HASH2001_PARAMSET_OID;
+			} else if (!strcmp("-2012-256:A", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410;
+				mtypes[0] = CKM_GOSTR3410_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2012_256_PARAMSET_A_OID;
+				hash_paramset_encoded_oid = GOST_HASH2012_256_PARAMSET_OID;
+			}
+			else if (!strcmp("-2012-256:B", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410;
+				mtypes[0] = CKM_GOSTR3410_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2001_PARAMSET_A_OID;
+				hash_paramset_encoded_oid = GOST_HASH2012_256_PARAMSET_OID;
+			}
+			else if (!strcmp("-2012-256:C", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410;
+				mtypes[0] = CKM_GOSTR3410_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2001_PARAMSET_B_OID;
+				hash_paramset_encoded_oid = GOST_HASH2012_256_PARAMSET_OID;
+			}
+			else if (!strcmp("-2012-256:D", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410;
+				mtypes[0] = CKM_GOSTR3410_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2001_PARAMSET_C_OID;
+				hash_paramset_encoded_oid = GOST_HASH2012_256_PARAMSET_OID;
+			}
+			else if (!strcmp("-2012-512:A", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410_512;
+				mtypes[0] = CKM_GOSTR3410_512_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2012_512_PARAMSET_A_OID;
+				hash_paramset_encoded_oid = GOST_HASH2012_512_PARAMSET_OID;
+			}
+			else if (!strcmp("-2012-512:B", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410_512;
+				mtypes[0] = CKM_GOSTR3410_512_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2012_512_PARAMSET_B_OID;
+				hash_paramset_encoded_oid = GOST_HASH2012_512_PARAMSET_OID;
+			}
+			else if (!strcmp("-2012-512:C", p_param_set)) {
+				gost_key_type = CKK_GOSTR3410_512;
+				mtypes[0] = CKM_GOSTR3410_512_KEY_PAIR_GEN;
+				key_paramset_encoded_oid = GOST2012_512_PARAMSET_C_OID;
+				hash_paramset_encoded_oid = GOST_HASH2012_512_PARAMSET_OID;
 			}
 			else
-				util_fatal("Unknown key type %s, valid key types for mechanism GOSTR3410 are GOSTR3410:A, GOSTR3410:B, GOSTR3410:C", type);
+				util_fatal("Unknown key type %s, valid key types for mechanism GOSTR3410 are GOSTR3410-2001:{A,B,C},"
+					" GOSTR3410-2012-256:{A,B,C,D}, GOSTR3410-2012-512:{A,B,C}", type);
 
-			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_GOSTR3410_PARAMS, key_paramset_encoded_oid, sizeof(key_paramset_encoded_oid));
+			if (!opt_mechanism_used) {
+				if (!find_mechanism(slot, CKF_GENERATE_KEY_PAIR, mtypes, mtypes_num, &opt_mechanism))
+					util_fatal("Generate GOSTR3410%s mechanism not supported", gost_key_type == CKK_GOSTR3410_512 ? "-2012-512" : "");
+			}
+
+			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_GOSTR3410_PARAMS, key_paramset_encoded_oid.value, key_paramset_encoded_oid.len);
 			n_pubkey_attr++;
-			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_GOSTR3410_PARAMS, key_paramset_encoded_oid, sizeof(key_paramset_encoded_oid));
+			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_GOSTR3410_PARAMS, key_paramset_encoded_oid.value, key_paramset_encoded_oid.len);
 			n_privkey_attr++;
 
-			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid, sizeof(hash_paramset_encoded_oid));
+			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid.value, hash_paramset_encoded_oid.len);
 			n_pubkey_attr++;
-			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid, sizeof(hash_paramset_encoded_oid));
+			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid.value, hash_paramset_encoded_oid.len);
 			n_privkey_attr++;
 
 			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_KEY_TYPE, &gost_key_type, sizeof(gost_key_type));
@@ -2402,6 +2497,13 @@ static int gen_keypair(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 		n_privkey_attr++;
 	}
 
+	if (opt_allowed_mechanisms_len > 0) {
+		FILL_ATTR(privateKeyTemplate[n_privkey_attr],
+			CKA_ALLOWED_MECHANISMS, opt_allowed_mechanisms,
+			sizeof(CK_MECHANISM_TYPE) * opt_allowed_mechanisms_len);
+		n_privkey_attr++;
+	}
+
 	rv = p11->C_GenerateKeyPair(session, &mechanism,
 		publicKeyTemplate, n_pubkey_attr,
 		privateKeyTemplate, n_privkey_attr,
@@ -2419,6 +2521,7 @@ static int gen_keypair(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 	return 1;
 }
 
+/* generate symmetric key */
 static int
 gen_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *hSecretKey,
 	const char *type, char *label)
@@ -2437,7 +2540,7 @@ gen_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *hSecretKey
 	CK_RV rv;
 
 	if (type != NULL) {
-		if (strncmp(type, "AES:", strlen("AES:")) == 0 || strncmp(type, "aes:", strlen("aes:")) == 0) {
+		if (strncasecmp(type, "AES:", strlen("AES:")) == 0) {
 			CK_MECHANISM_TYPE mtypes[] = {CKM_AES_KEY_GEN};
 			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
 			const char *size = type + strlen("AES:");
@@ -2457,7 +2560,7 @@ gen_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *hSecretKey
 			FILL_ATTR(keyTemplate[n_attr], CKA_KEY_TYPE, &key_type, sizeof(key_type));
 			n_attr++;
 		}
-		else if (strncmp(type, "DES:", strlen("DES:")) == 0 || strncmp(type, "des:", strlen("des:")) == 0) {
+		else if (strncasecmp(type, "DES:", strlen("DES:")) == 0) {
 			CK_MECHANISM_TYPE mtypes[] = {CKM_DES_KEY_GEN};
 			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
 			const char *size = type + strlen("DES:");
@@ -2477,7 +2580,7 @@ gen_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *hSecretKey
 			FILL_ATTR(keyTemplate[n_attr], CKA_KEY_TYPE, &key_type, sizeof(key_type));
 			n_attr++;
 		}
-		else if (strncmp(type, "DES3:", strlen("DES3:")) == 0 || strncmp(type, "des3:", strlen("des3:")) == 0) {
+		else if (strncasecmp(type, "DES3:", strlen("DES3:")) == 0) {
 			CK_MECHANISM_TYPE mtypes[] = {CKM_DES3_KEY_GEN};
 			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
 			const char *size = type + strlen("DES3:");
@@ -2535,6 +2638,13 @@ gen_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *hSecretKey
 
 	if (opt_object_id_len != 0) {
 		FILL_ATTR(keyTemplate[n_attr], CKA_ID, opt_object_id, opt_object_id_len);
+		n_attr++;
+	}
+
+	if (opt_allowed_mechanisms_len > 0) {
+		FILL_ATTR(keyTemplate[n_attr],
+			CKA_ALLOWED_MECHANISMS, opt_allowed_mechanisms,
+			sizeof(CK_MECHANISM_TYPE) * opt_allowed_mechanisms_len);
 		n_attr++;
 	}
 
@@ -2819,17 +2929,17 @@ static int write_object(CK_SESSION_HANDLE session)
 	unsigned char certdata[MAX_OBJECT_SIZE];
 	int certdata_len = 0;
 	FILE *f;
-	CK_OBJECT_HANDLE cert_obj, privkey_obj, pubkey_obj, data_obj;
-	CK_ATTRIBUTE cert_templ[20], privkey_templ[20], pubkey_templ[20], data_templ[20];
-	int n_cert_attr = 0, n_privkey_attr = 0, n_pubkey_attr = 0, n_data_attr = 0;
+	CK_OBJECT_HANDLE cert_obj, privkey_obj, pubkey_obj, seckey_obj, data_obj;
+	CK_ATTRIBUTE cert_templ[20], privkey_templ[20], pubkey_templ[20], seckey_templ[20], data_templ[20];
+	int n_cert_attr = 0, n_privkey_attr = 0, n_pubkey_attr = 0, n_seckey_attr = 0, n_data_attr = 0;
 	struct sc_object_id oid;
 	CK_RV rv;
 	int need_to_parse_certdata = 0;
 	unsigned char *oid_buf = NULL;
 	CK_OBJECT_CLASS clazz;
 	CK_CERTIFICATE_TYPE cert_type;
-#ifdef ENABLE_OPENSSL
 	CK_KEY_TYPE type = CKK_RSA;
+#ifdef ENABLE_OPENSSL
 	struct x509cert_info cert;
 	struct rsakey_info rsa;
 	struct gostkey_info gost;
@@ -2928,7 +3038,9 @@ static int write_object(CK_SESSION_HANDLE session)
 #endif
 	}
 
-	if (opt_object_class == CKO_CERTIFICATE) {
+	switch(opt_object_class)
+	{
+	case CKO_CERTIFICATE:
 		clazz = CKO_CERTIFICATE;
 		cert_type = CKC_X_509;
 
@@ -2956,9 +3068,8 @@ static int write_object(CK_SESSION_HANDLE session)
 		FILL_ATTR(cert_templ[n_cert_attr], CKA_SERIAL_NUMBER, cert.serialnum, cert.serialnum_len);
 		n_cert_attr++;
 #endif
-	}
-	else
-	if (opt_object_class == CKO_PRIVATE_KEY) {
+		break;
+	case CKO_PRIVATE_KEY:
 		clazz = CKO_PRIVATE_KEY;
 
 		n_privkey_attr = 0;
@@ -2996,6 +3107,13 @@ static int write_object(CK_SESSION_HANDLE session)
 				&_true, sizeof(_true));
 			n_privkey_attr++;
 		}
+		if (opt_allowed_mechanisms_len > 0) {
+			FILL_ATTR(privkey_templ[n_privkey_attr],
+				CKA_ALLOWED_MECHANISMS, opt_allowed_mechanisms,
+				sizeof(CK_MECHANISM_TYPE) * opt_allowed_mechanisms_len);
+			n_privkey_attr++;
+		}
+
 
 #ifdef ENABLE_OPENSSL
 		if (cert.subject_len != 0) {
@@ -3053,9 +3171,8 @@ static int write_object(CK_SESSION_HANDLE session)
 
 #endif
 #endif
-	}
-	else
-	if (opt_object_class == CKO_PUBLIC_KEY) {
+		break;
+	case CKO_PUBLIC_KEY:
 		clazz = CKO_PUBLIC_KEY;
 #ifdef ENABLE_OPENSSL
 		pk_type = EVP_PKEY_base_id(evp_key);
@@ -3153,9 +3270,54 @@ static int write_object(CK_SESSION_HANDLE session)
 		}
 #endif
 #endif
-	}
-	else
-	if (opt_object_class == CKO_DATA) {
+		break;
+	case CKO_SECRET_KEY:
+		clazz = CKO_SECRET_KEY;
+		type = CKK_AES;
+
+		if (opt_key_type != 0) {
+			if (strncasecmp(opt_key_type, "AES:", strlen("AES:")) == 0)
+				type = CKK_AES;
+			else if (strncasecmp(opt_key_type, "DES3:", strlen("DES3:")) == 0)
+				type = CKK_DES3;
+			else
+				util_fatal("Unknown key type %s", type);
+		}
+
+		FILL_ATTR(seckey_templ[0], CKA_CLASS, &clazz, sizeof(clazz));
+		FILL_ATTR(seckey_templ[1], CKA_KEY_TYPE, &type, sizeof(type));
+		FILL_ATTR(seckey_templ[2], CKA_TOKEN, &_true, sizeof(_true));
+		FILL_ATTR(seckey_templ[3], CKA_VALUE, &contents, contents_len);
+		n_seckey_attr = 4;
+
+		if (opt_is_private != 0) {
+			FILL_ATTR(seckey_templ[n_seckey_attr], CKA_PRIVATE, &_true, sizeof(_true));
+			n_seckey_attr++;
+		}
+		else {
+			FILL_ATTR(seckey_templ[n_seckey_attr], CKA_PRIVATE, &_false, sizeof(_false));
+			n_seckey_attr++;
+		}
+
+		if (opt_is_sensitive != 0) {
+			FILL_ATTR(seckey_templ[n_seckey_attr], CKA_SENSITIVE, &_true, sizeof(_true));
+			n_seckey_attr++;
+		}
+		else {
+			FILL_ATTR(seckey_templ[n_seckey_attr], CKA_SENSITIVE, &_false, sizeof(_false));
+			n_seckey_attr++;
+		}
+
+		if (opt_object_label != NULL) {
+			FILL_ATTR(seckey_templ[n_seckey_attr], CKA_LABEL, opt_object_label, strlen(opt_object_label));
+			n_seckey_attr++;
+		}
+		if (opt_object_id_len != 0)  {
+			FILL_ATTR(seckey_templ[n_seckey_attr], CKA_ID, opt_object_id, opt_object_id_len);
+			n_seckey_attr++;
+		}
+		break;
+	case CKO_DATA:
 		clazz = CKO_DATA;
 		FILL_ATTR(data_templ[0], CKA_CLASS, &clazz, sizeof(clazz));
 		FILL_ATTR(data_templ[1], CKA_TOKEN, &_true, sizeof(_true));
@@ -3195,10 +3357,11 @@ static int write_object(CK_SESSION_HANDLE session)
 			FILL_ATTR(data_templ[n_data_attr], CKA_LABEL, opt_object_label, strlen(opt_object_label));
 			n_data_attr++;
 		}
-
-	}
-	else
+		break;
+	default:
 		util_fatal("Writing of a \"%s\" type not (yet) supported", opt_object_class_str);
+		break;
+	}
 
 	if (n_data_attr) {
 		rv = p11->C_CreateObject(session, data_templ, n_data_attr, &data_obj);
@@ -3233,6 +3396,15 @@ static int write_object(CK_SESSION_HANDLE session)
 
 		printf("Created private key:\n");
 		show_object(session, privkey_obj);
+	}
+
+	if (n_seckey_attr) {
+		rv = p11->C_CreateObject(session, seckey_templ, n_seckey_attr, &seckey_obj);
+		if (rv != CKR_OK)
+			p11_fatal("C_CreateObject", rv);
+
+		printf("Created secret key:\n");
+		show_object(session, seckey_obj);
 	}
 
 	if (oid_buf)
@@ -3533,6 +3705,13 @@ derive_ec_key(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key, CK_MECHANISM_TYPE
 	FILL_ATTR(newkey_template[n_attrs], CKA_VALUE_LEN, &key_len, sizeof(key_len));
 	n_attrs++;
 
+	if (opt_allowed_mechanisms_len > 0) {
+		FILL_ATTR(newkey_template[n_attrs],
+			CKA_ALLOWED_MECHANISMS, opt_allowed_mechanisms,
+			sizeof(CK_MECHANISM_TYPE) * opt_allowed_mechanisms_len);
+		n_attrs++;
+	}
+
 	buf_size = EC_POINT_point2oct(ecgroup, ecpoint, POINT_CONVERSION_UNCOMPRESSED, NULL,	    0, NULL);
 	buf = (unsigned char *)malloc(buf_size);
 	if (buf == NULL)
@@ -3631,6 +3810,7 @@ derive_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key)
 static void
 show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 {
+	CK_MECHANISM_TYPE_PTR mechs = NULL;
 	CK_KEY_TYPE	key_type = getKEY_TYPE(sess, obj);
 	CK_ULONG	size = 0;
 	unsigned char	*id, *oid, *value;
@@ -3665,7 +3845,22 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 			printf("; RSA \n");
 		break;
 	case CKK_GOSTR3410:
-		printf("; GOSTR3410 \n");
+	case CKK_GOSTR3410_512:
+		oid = getGOSTR3411_PARAMS(sess, obj, &size);
+		if (oid) {
+			if (size == GOST_HASH2001_PARAMSET_OID.len && !memcmp(oid, GOST_HASH2001_PARAMSET_OID.value, size))
+				printf("; GOSTR3410\n");
+			else if (size == GOST_HASH2012_256_PARAMSET_OID.len && !memcmp(oid, GOST_HASH2012_256_PARAMSET_OID.value, size))
+				printf("; GOSTR3410-2012-256\n");
+			else if (size == GOST_HASH2012_512_PARAMSET_OID.len && !memcmp(oid, GOST_HASH2012_512_PARAMSET_OID.value, size))
+				printf("; GOSTR3410-2012-512\n");
+			else
+				printf("; unknown GOSTR3410 algorithm\n");
+			free(oid);
+		} else {
+			printf("; unknown GOSTR3410 algorithm\n");
+		}
+
 		oid = getGOSTR3410_PARAMS(sess, obj, &size);
 		if (oid) {
 			unsigned int	n;
@@ -3834,8 +4029,52 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 		printf("none");
 	printf("\n");
 
-	if (!pub && getALWAYS_AUTHENTICATE(sess, obj))
-		printf("  Access:     always authenticate\n");
+	printf("  Access:     ");
+	sepa = "";
+	if (!pub && getALWAYS_AUTHENTICATE(sess, obj)) {
+		printf("%salways authenticate", sepa);
+		sepa = ", ";
+	}
+	if (!pub || sec) {
+		if (getSENSITIVE(sess, obj)) {
+			printf("%ssensitive", sepa);
+			sepa = ", ";
+		}
+		if (getALWAYS_SENSITIVE(sess, obj)) {
+			printf("%salways sensitive", sepa);
+			sepa = ", ";
+		}
+		if (getEXTRACTABLE(sess, obj)) {
+			printf("%sextractable", sepa);
+			sepa = ", ";
+		}
+		if (getNEVER_EXTRACTABLE(sess, obj)) {
+			printf("%snever extractable", sepa);
+			sepa = ", ";
+		}
+	}
+	if (getLOCAL(sess, obj)) {
+		printf("%slocal", sepa);
+		sepa = ", ";
+	}
+	if (!*sepa)
+		printf("none");
+	printf("\n");
+
+	if (!pub) {
+		mechs = getALLOWED_MECHANISMS(sess, obj, &size);
+		if (mechs && size) {
+			unsigned int n;
+
+			printf("  Allowed mechanisms: ");
+			for (n = 0; n < size; n++) {
+				printf("%s%s", (n != 0 ? "," : ""),
+					p11_mechanism_to_name(mechs[n]));
+			}
+			printf("\n");
+		}
+	}
+
 	suppress_warn = 0;
 }
 
@@ -4274,7 +4513,7 @@ static int delete_object(CK_SESSION_HANDLE session)
 		nn_attrs++;
 	}
 
-	rv = find_object_with_attributes(session, &obj, attrs, nn_attrs, 0);
+	rv = find_object_with_attributes(session, &obj, attrs, nn_attrs, opt_object_index);
 	if (rv != CKR_OK)
 		p11_fatal("find_object_with_attributes()", rv);
 	else if (obj==CK_INVALID_HANDLE)
@@ -6240,11 +6479,26 @@ static struct mech_info	p11_mechanisms[] = {
       { CKM_DES3_CBC_ENCRYPT_DATA, "DES3-CBC-ENCRYPT-DATA", NULL },
       { CKM_AES_ECB_ENCRYPT_DATA, "AES-ECB-ENCRYPT-DATA", NULL },
       { CKM_AES_CBC_ENCRYPT_DATA, "AES-CBC-ENCRYPT-DATA", NULL },
+      { CKM_GOST28147_KEY_GEN,	"GOST28147-KEY-GEN", NULL },
+      { CKM_GOST28147_ECB,	"GOST28147-ECB", NULL },
+      { CKM_GOST28147,	"GOST28147", NULL },
+      { CKM_GOST28147_MAC,	"GOST28147-MAC", NULL },
+      { CKM_GOST28147_KEY_WRAP,	"GOST28147-KEY-WRAP", NULL },
       { CKM_GOSTR3410_KEY_PAIR_GEN,"GOSTR3410-KEY-PAIR-GEN", NULL },
       { CKM_GOSTR3410,		"GOSTR3410", NULL },
+      { CKM_GOSTR3410_DERIVE,	"GOSTR3410-DERIVE", NULL },
       { CKM_GOSTR3410_WITH_GOSTR3411,"GOSTR3410-WITH-GOSTR3411", NULL },
+      { CKM_GOSTR3410_512_KEY_PAIR_GEN,	"GOSTR3410-512-KEY-PAIR-GEN", NULL },
+      { CKM_GOSTR3410_512,	"GOSTR3410_512", NULL },
+      { CKM_GOSTR3410_12_DERIVE,	"GOSTR3410-12-DERIVE", NULL },
+      { CKM_GOSTR3410_WITH_GOSTR3411_12_256,	"GOSTR3410-WITH-GOSTR3411-12-256", NULL },
+      { CKM_GOSTR3410_WITH_GOSTR3411_12_512,	"GOSTR3410-WITH-GOSTR3411-12-512", NULL },
       { CKM_GOSTR3411,		"GOSTR3411", NULL },
       { CKM_GOSTR3411_HMAC,	"GOSTR3411-HMAC", NULL },
+      { CKM_GOSTR3411_12_256,	"GOSTR3411-12-256", NULL },
+      { CKM_GOSTR3411_12_512,	"GOSTR3411-12-512", NULL },
+      { CKM_GOSTR3411_12_256_HMAC,	"GOSTR3411-12-256-HMAC", NULL },
+      { CKM_GOSTR3411_12_512_HMAC,	"GOSTR3411-12-512-HMAC", NULL },
       { CKM_DSA_PARAMETER_GEN,	"DSA-PARAMETER-GEN", NULL },
       { CKM_DH_PKCS_PARAMETER_GEN,"DH-PKCS-PARAMETER-GEN", NULL },
       { CKM_X9_42_DH_PARAMETER_GEN,"X9-42-DH-PARAMETER-GEN", NULL },

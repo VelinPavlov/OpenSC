@@ -11,13 +11,18 @@ https://developer.apple.com/library/mac/documentation/DeveloperTools/Reference/D
     <title>@PACKAGE_STRING@</title>
     <options customize="allow" require-scripts="false"/>
     <choices-outline>
-        <line choice="default" />
-        <line choice="tokend" />
+        <line choice="default">
+            <line choice="tokend" />
+            <line choice="startup" />
+        </line>
     </choices-outline>
     <choice id="default" title="OpenSC PKCS11 and tools" enabled="false">
         <pkg-ref id="org.opensc-project.mac">OpenSC.pkg</pkg-ref>
     </choice>
     <choice id="tokend" title="OpenSC tokend">
         <pkg-ref id="org.opensc-project.tokend">OpenSC-tokend.pkg</pkg-ref>
+    </choice>
+    <choice id="startup" title="OpenSC startup icons">
+        <pkg-ref id="org.opensc-project.startup">OpenSC-startup.pkg</pkg-ref>
     </choice>
 </installer-gui-script>
