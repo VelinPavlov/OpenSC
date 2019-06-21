@@ -63,6 +63,7 @@
 #define MYEID_MAX_EXT_APDU_BUFFER_SIZE	(MYEID_MAX_RSA_KEY_LEN/8+16)
 
 static const char *myeid_card_name = "MyEID";
+static const char *oseid_card_name = "OsEID";
 static char card_name_buf[MYEID_CARD_NAME_MAX_LEN];
 
 static struct sc_card_operations myeid_ops;
@@ -114,12 +115,21 @@ static int myeid_get_card_caps(struct sc_card *card, myeid_card_caps_t* card_cap
 
 static int myeid_match_card(struct sc_card *card)
 {
+	size_t len = card->reader->atr_info.hist_bytes_len;
 	/* Normally the historical bytes are exactly "MyEID", but there might
 	 * be some historic units which have a small prefix byte sequence. */
-	if (card->reader->atr_info.hist_bytes_len >= 5 &&
-	    !memcmp(&card->reader->atr_info.hist_bytes[card->reader->atr_info.hist_bytes_len - 5], "MyEID", 5)) {
-		card->type = SC_CARD_TYPE_MYEID_GENERIC;
-		return 1;
+	if (len >= 5) {
+		if (!memcmp(&card->reader->atr_info.hist_bytes[len - 5], "MyEID", 5)) {
+			sc_log(card->ctx, "Matched MyEID card");
+			card->type = SC_CARD_TYPE_MYEID_GENERIC;
+			return 1;
+		}
+		/* The software implementation of MyEID is identified by OsEID bytes */
+		if (!memcmp(&card->reader->atr_info.hist_bytes[len - 5], "OsEID", 5)) {
+			sc_log(card->ctx, "Matched OsEID card");
+			card->type = SC_CARD_TYPE_MYEID_OSEID;
+			return 1;
+		}
 	}
 	return 0;
 }
@@ -169,7 +179,16 @@ static int myeid_init(struct sc_card *card)
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	card->name = myeid_card_name;
+	switch (card->type) {
+	case SC_CARD_TYPE_MYEID_OSEID:
+		card->name = oseid_card_name;
+		break;
+	case SC_CARD_TYPE_MYEID_GENERIC:
+		card->name = myeid_card_name;
+		break;
+	default:
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_CARD);
+	}
 
 	priv = calloc(1, sizeof(myeid_private_data_t));
 
@@ -1295,7 +1314,7 @@ static int myeid_decipher(struct sc_card *card, const u8 * crgram,
 
 	if (priv->sec_env && priv->sec_env->algorithm == SC_ALGORITHM_EC
 		&& priv->sec_env->operation == SC_SEC_OPERATION_DERIVE
-		&& priv->sec_env->algorithm_flags & SC_ALGORITHM_ECDSA_RAW)
+		&& priv->sec_env->algorithm_flags & SC_ALGORITHM_ECDH_CDH_RAW)
 	{
 		r = myeid_ecdh_derive(card, crgram, crgram_len, out, outlen);
 		priv->sec_env = NULL; /* clear after operation */
@@ -1441,36 +1460,27 @@ static int myeid_loadkey(sc_card_t *card, unsigned mode, u8* value, int value_le
 	myeid_private_data_t *priv = (myeid_private_data_t *) card->drv_data;
 	sc_apdu_t apdu;
 	u8 sbuf[MYEID_MAX_EXT_APDU_BUFFER_SIZE];
-	int r, len;
+	int r;
 
 	LOG_FUNC_CALLED(card->ctx);
-	len = 0;
 	if (value_len == 0 || value == NULL)
 		return 0;
-
-	if (value[0] != 0x0 &&
-	    mode     != LOAD_KEY_PUBLIC_EXPONENT &&
-	    mode     != LOAD_KEY_SYMMETRIC)
-		sbuf[len++] = 0x0;
 
 	if (mode == LOAD_KEY_MODULUS && value_len == 256 && !priv->cap_chaining)
 	{
 		if ((value_len % 2) > 0 && value[0] == 0x00)
 		{
 			value_len--;
-			memmove(value, value + 1, value_len);
+			value++;
 		}
-		mode   = 0x88;
-		len    = 128;
-		memcpy(sbuf,value, 128);
-
+		mode = 0x88;
 		memset(&apdu, 0, sizeof(apdu));
 		sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xDA, 0x01, mode);
 
 		apdu.cla     = 0x00;
-		apdu.data    = sbuf;
-		apdu.datalen = len;
-		apdu.lc	     = len;
+		apdu.data    = value;
+		apdu.datalen = 128;
+		apdu.lc	     = 128;
 
 		r = sc_transmit_apdu(card, &apdu);
 		LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
@@ -1479,23 +1489,26 @@ static int myeid_loadkey(sc_card_t *card, unsigned mode, u8* value, int value_le
 		LOG_TEST_RET(card->ctx, r, "LOAD KEY returned error");
 
 		mode = 0x89;
-		len  = value_len - 128;
-		memset(&sbuf, 0, SC_MAX_APDU_BUFFER_SIZE);
-		memcpy(sbuf,value + 128, value_len - 128);
+		value += 128;
+		value_len -= 128;
 	}
-	else
+	else if ((mode & 0xff00) == 0 && mode != LOAD_KEY_PUBLIC_EXPONENT &&
+		 value[0] != 0x00)
 	{
-		memcpy(sbuf + len, value, value_len);
-		len += value_len;
+		/* RSA components needing leading zero byte */
+		sbuf[0] = 0x0;
+		memcpy(&sbuf[1], value, value_len);
+		value = sbuf;
+		value_len ++;
 	}
 
 	memset(&apdu, 0, sizeof(apdu));
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xDA, 0x01, mode & 0xFF);
 	apdu.flags   = SC_APDU_FLAGS_CHAINING;
 	apdu.cla     = 0x00;
-	apdu.data    = sbuf;
-	apdu.datalen = len;
-	apdu.lc	     = len;
+	apdu.data    = value;
+	apdu.datalen = value_len;
+	apdu.lc	     = value_len;
 
 	r = sc_transmit_apdu(card, &apdu);
 	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
