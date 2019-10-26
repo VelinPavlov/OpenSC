@@ -1039,6 +1039,10 @@ sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 		sc_log(ctx, "EF(ODF) is empty");
 		goto end;
 	}
+	if (len > MAX_FILE_SIZE) {
+		sc_log(ctx, "EF(ODF) too large");
+		goto end;
+	}
 	buf = malloc(len);
 	if(buf == NULL)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
@@ -2286,7 +2290,7 @@ sc_pkcs15_parse_unusedspace(const unsigned char *buf, size_t buflen, struct sc_p
 		/* If the path length is 0, it's a dummy path then don't add it.
 		 * If the path length isn't included (-1) then it's against the standard
 		 *   but we'll just ignore it instead of returning an error. */
-		if (path.count > 0) {
+		if (path.count > 0 && p15card->file_app) {
 			r = sc_pkcs15_make_absolute_path(&p15card->file_app->path, &path);
 			if (r < 0)
 				return r;
