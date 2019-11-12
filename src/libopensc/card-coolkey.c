@@ -897,7 +897,7 @@ static int coolkey_check_sw(sc_card_t *card, unsigned int sw1, unsigned int sw2)
 	sc_log(card->ctx, 
 		"sw1 = 0x%02x, sw2 = 0x%02x\n", sw1, sw2);
 
-	if (sw1 == 0x90)
+	if (sw1 == 0x90 && sw2 == 0x00)
 		return SC_SUCCESS;
 
 	if (sw1 == 0x9c) {
@@ -1052,30 +1052,36 @@ coolkey_get_life_cycle(sc_card_t *card, coolkey_life_cycle_t *life_cycle)
 {
 	coolkey_status_t status;
 	u8 *receive_buf;
-	size_t len;
-	int r;
+	size_t receive_len;
+	int len;
 
-	len = sizeof(*life_cycle);
+	receive_len = sizeof(*life_cycle);
 	receive_buf = (u8 *)life_cycle;
-	r = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_LIFE_CYCLE, 0, 0,
-			NULL, 0, &receive_buf, &len, NULL, 0);
-	if (r == sizeof(*life_cycle)) {
+	len = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_LIFE_CYCLE, 0, 0,
+			NULL, 0, &receive_buf, &receive_len, NULL, 0);
+	if (len == sizeof(*life_cycle)) {
 		return SC_SUCCESS;
 	}
 
-	len = 1;
+	receive_len = 1;
 	receive_buf = &life_cycle->life_cycle;
-	r = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_LIFE_CYCLE, 0, 0,
-			NULL, 0, &receive_buf, &len, NULL, 0);
-	if (r < 0) {
-		return r;
+	len = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_LIFE_CYCLE, 0, 0,
+			NULL, 0, &receive_buf, &receive_len, NULL, 0);
+	if (len < 0) { /* Error from the trasmittion */
+		return len;
 	}
-	len = sizeof(status);
+	if (len != 1) { /* The returned data is invalid */
+		return SC_ERROR_INTERNAL;
+	}
+	receive_len = sizeof(status);
 	receive_buf = (u8 *)&status;
-	r = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_STATUS, 0, 0,
-			NULL, 0, &receive_buf, &len, NULL, 0);
-	if (r < 0) {
-		return r;
+	len = coolkey_apdu_io(card, COOLKEY_CLASS, COOLKEY_INS_GET_STATUS, 0, 0,
+			NULL, 0, &receive_buf, &receive_len, NULL, 0);
+	if (len < 0) { /* Error from the trasmittion */
+		return len;
+	}
+	if (len != sizeof(status)) { /* The returned data is invalid */
+		return SC_ERROR_INTERNAL;
 	}
 	life_cycle->protocol_version_major = status.protocol_version_major;
 	life_cycle->protocol_version_minor = status.protocol_version_minor;
