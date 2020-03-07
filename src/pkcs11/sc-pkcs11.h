@@ -200,6 +200,11 @@ struct sc_pkcs11_card {
 	unsigned int nmechanisms;
 };
 
+/* If the slot did already show with `C_GetSlotList`, then we need to keep this
+ * slot alive. PKCS#11 2.30 allows allows adding but not removing slots until
+ * the application calls `C_GetSlotList` with `NULL`. This flag tracks the
+ * visibility to the application */
+#define SC_PKCS11_SLOT_FLAG_SEEN 1
 
 struct sc_pkcs11_slot {
 	CK_SLOT_ID id;			/* ID of the slot */
@@ -223,8 +228,7 @@ typedef struct sc_pkcs11_slot sc_pkcs11_slot_t;
 
 /* Debug virtual slots. S is slot to be highlighted or NULL
  * C is a comment format string and args It will be preceeded by "VSS " */
-
-#define DEBUG_VSS(S, C...) sc_log(context,"VSS " C); _debug_virtual_slots(S)
+#define DEBUG_VSS(S, ...) do { sc_log(context,"VSS " __VA_ARGS__); _debug_virtual_slots(S); } while (0)
 
 /* called by DEBUG_VSS to print table of virtual slots */
 void  _debug_virtual_slots(sc_pkcs11_slot_t *p);
