@@ -189,9 +189,10 @@ static int cancellation_fd[] = {-1, -1};
 
 void sig_handler(int sig) {
 	run_daemon = 0;
-	if (-1 == write(cancellation_fd[1], &sig, sizeof sig)) {
-		fprintf(stderr, "Failed immediate cancellation: %s", strerror(errno));
-	}
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+	(void)write(cancellation_fd[1], &sig, sizeof sig);
+#pragma GCC diagnostic pop
 }
 
 static void *cancellation_proc(void *arg)
