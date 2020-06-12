@@ -501,8 +501,10 @@ auth_select_file(struct sc_card *card, const struct sc_path *in_path,
 				sc_concatenate_path(&auth_current_ef->path, &auth_current_df->path, &path);
 			}
 		}
-		if (file_out)
+		if (file_out) {
+			sc_file_free(*file_out);
 			sc_file_dup(file_out, tmp_file);
+		}
 
 		sc_file_free(tmp_file);
 	}
@@ -2164,12 +2166,16 @@ auth_read_binary(struct sc_card *card, unsigned int offset,
 		key.exponent = bn[0];
 		key.modulus = bn[1];
 
-		if (sc_pkcs15_encode_pubkey_rsa(card->ctx, &key, &out, &out_len)) {
+		if (sc_pkcs15_encode_pubkey_rsa(card->ctx, &key, &out, &out_len) != SC_SUCCESS) {
 			rv = SC_ERROR_INVALID_ASN1_OBJECT;
 			LOG_TEST_GOTO_ERR(card->ctx, rv, "cannot encode RSA public key");
 		}
 		else {
-			rv  = out_len - offset > count ? count : out_len - offset;
+			if (out_len < offset) {
+				rv = SC_ERROR_UNKNOWN_DATA_RECEIVED;
+				goto err;
+			}
+			rv = ((out_len - offset) > count) ? count : (out_len - offset);
 			memcpy(buf, out + offset, rv);
 
 			sc_log_hex(card->ctx, "write_publickey", buf, rv);
