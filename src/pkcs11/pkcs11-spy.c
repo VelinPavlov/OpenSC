@@ -182,6 +182,7 @@ ck_interface compat_interfaces[NUM_INTERFACES] = {
 static CK_RV
 init_spy(void)
 {
+	CK_FUNCTION_LIST_PTR po_v2 = NULL;
 	const char *output, *module;
 	CK_RV rv = CKR_OK;
 #ifdef _WIN32
@@ -285,8 +286,8 @@ init_spy(void)
 		free(pkcs11_spy);
 		return CKR_DEVICE_ERROR;
 	}
-
-	modhandle = C_LoadModule(module, (CK_FUNCTION_LIST_PTR_PTR)&po);
+	modhandle = C_LoadModule(module, &po_v2);
+	po = (CK_FUNCTION_LIST_3_0_PTR) po_v2;
 	if (modhandle && po) {
 		fprintf(spy_output, "Loaded: \"%s\"\n", module);
 	}
@@ -542,9 +543,9 @@ C_GetMechanismInfo(CK_SLOT_ID  slotID, CK_MECHANISM_TYPE type,
 	enter("C_GetMechanismInfo");
 	spy_dump_ulong_in("slotID", slotID);
 	if (name)
-		fprintf(spy_output, "%30s \n", name);
+		fprintf(spy_output, "[in] type = %30s\n", name);
 	else
-		fprintf(spy_output, " Unknown Mechanism (%08lx)  \n", type);
+		fprintf(spy_output, "[in] type = Unknown Mechanism (%08lx)\n", type);
 
 	rv = po->C_GetMechanismInfo(slotID, type, pInfo);
 	if(rv == CKR_OK) {
