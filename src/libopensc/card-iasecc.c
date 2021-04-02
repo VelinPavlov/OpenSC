@@ -1039,7 +1039,8 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 			apdu.p1 = 0x04;
 			if (card->type == SC_CARD_TYPE_IASECC_AMOS ||
 			    card->type == SC_CARD_TYPE_IASECC_MI2 ||
-			    card->type == SC_CARD_TYPE_IASECC_OBERTHUR)   {
+			    card->type == SC_CARD_TYPE_IASECC_OBERTHUR ||
+			    iasecc_is_cpx(card)) {
 				apdu.p2 = 0x04;
 			}
 		}
@@ -1063,6 +1064,7 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 			rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
 			if (rv == SC_ERROR_INCORRECT_PARAMETERS &&
 					lpath.type == SC_PATH_TYPE_DF_NAME && apdu.p2 == 0x00)   {
+				sc_log(ctx, "Warning: SC_ERROR_INCORRECT_PARAMETERS for SC_PATH_TYPE_DF_NAME, try again with P2=0x0C");
 				apdu.p2 = 0x0C;
 				continue;
 			}
