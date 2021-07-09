@@ -63,9 +63,9 @@ extern "C" {
    version of this file, please consider deleting the revision macro
    (you may use a macro with a different name to keep track of your
    versions).  */
-#define CRYPTOKI_VERSION_MAJOR		2
-#define CRYPTOKI_VERSION_MINOR		20
-#define CRYPTOKI_VERSION_REVISION	6
+#define CRYPTOKI_VERSION_MAJOR		3
+#define CRYPTOKI_VERSION_MINOR		0
+#define CRYPTOKI_VERSION_REVISION	0
 
 
 /* Compatibility interface is default, unless CRYPTOKI_GNU is
@@ -374,8 +374,10 @@ typedef unsigned long ck_key_type_t;
 #define CKK_EC_MONTGOMERY	(0x41UL)
 #define CKK_VENDOR_DEFINED	(1UL << 31)
 
-// A mask for new GOST algorithms.
-// For details visit https://tc26.ru/standarts/perevody/guidelines-the-pkcs-11-extensions-for-implementing-the-gost-r-34-10-2012-and-gost-r-34-11-2012-russian-standards-.html
+/*
+ * A mask for new GOST algorithms.
+ * For details visit https://tc26.ru/standarts/perevody/guidelines-the-pkcs-11-extensions-for-implementing-the-gost-r-34-10-2012-and-gost-r-34-11-2012-russian-standards-.html
+ */
 #define NSSCK_VENDOR_PKCS11_RU_TEAM     (CKK_VENDOR_DEFINED | 0x54321000)
 #define CK_VENDOR_PKCS11_RU_TEAM_TK26   NSSCK_VENDOR_PKCS11_RU_TEAM
 
@@ -1783,6 +1785,8 @@ typedef struct ck_c_initialize_args *CK_C_INITIALIZE_ARGS_PTR;
 
 #undef ck_rv_t
 #undef ck_notify_t
+
+#undef ck_interface
 
 #undef ck_function_list
 #undef ck_function_list_3_0

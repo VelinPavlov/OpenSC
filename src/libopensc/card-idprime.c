@@ -203,12 +203,16 @@ static int idprime_process_index(sc_card_t *card, idprime_private_data_t *priv, 
 				if (start[8] >= '0' && start[8] <= '9') {
 					key_id = start[8] - '0';
 				}
-				if (card->type == SC_CARD_TYPE_IDPRIME_V2) {
-					/* The key reference starts from 0x11 and increments by the key id (ASCII) */
+				switch (card->type) {
+				case SC_CARD_TYPE_IDPRIME_V2:
 					new_object.key_reference = 0x11 + key_id;
-				} else { /* V3 */
-					/* The key reference starts from 0xF7 and increments by the key id (ASCII) */
+					break;
+				case SC_CARD_TYPE_IDPRIME_V3:
 					new_object.key_reference = 0xF7 + key_id;
+					break;
+				case SC_CARD_TYPE_IDPRIME_V4:
+					new_object.key_reference = 0x56 + key_id;
+					break;
 				}
 			}
 			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Found certificate with fd=%d, key_ref=%d",
@@ -261,6 +265,10 @@ static int idprime_init(sc_card_t *card)
 			card->type = SC_CARD_TYPE_IDPRIME_V3;
 			sc_log(card->ctx, "Detected IDPrime applet version 3");
 			break;
+		case 0x04:
+			card->type = SC_CARD_TYPE_IDPRIME_V4;
+			sc_log(card->ctx, "Detected IDPrime applet version 4");
+			break;
 		default:
 			sc_log(card->ctx, "Unknown OS version received: %d", rbuf[11]);
 			break;
@@ -298,6 +306,12 @@ static int idprime_init(sc_card_t *card)
 		break;
 	case SC_CARD_TYPE_IDPRIME_V2:
 		card->name = "Gemalto IDPrime (OSv2)";
+		break;
+	case SC_CARD_TYPE_IDPRIME_V3:
+		card->name = "Gemalto IDPrime (OSv3)";
+		break;
+	case SC_CARD_TYPE_IDPRIME_V4:
+		card->name = "Gemalto IDPrime (OSv4)";
 		break;
 	case SC_CARD_TYPE_IDPRIME_GENERIC:
 	default:
@@ -650,11 +664,11 @@ idprime_set_security_env(struct sc_card *card,
 				new_env.algorithm_ref = 0x65;
 			}
 		} else { /* RSA-PKCS */
-			if (env->algorithm_flags & SC_ALGORITHM_MGF1_SHA256) {
+			if (env->algorithm_flags & SC_ALGORITHM_RSA_HASH_SHA256) {
 				new_env.algorithm_ref = 0x42;
-			} else if (env->algorithm_flags & SC_ALGORITHM_MGF1_SHA384) {
+			} else if (env->algorithm_flags & SC_ALGORITHM_RSA_HASH_SHA384) {
 				new_env.algorithm_ref = 0x52;
-			} else if (env->algorithm_flags & SC_ALGORITHM_MGF1_SHA512) {
+			} else if (env->algorithm_flags & SC_ALGORITHM_RSA_HASH_SHA512) {
 				new_env.algorithm_ref = 0x62;
 			} else { /* RSA-PKCS without hashing */
 				new_env.algorithm_ref = 0x02;

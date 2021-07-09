@@ -1,5 +1,5 @@
 #!/bin/bash
-SOURCE_PATH=..
+SOURCE_PATH=${SOURCE_PATH:-../}
 
 EXPORTS=`find "${SOURCE_PATH}" -name "*exports"`
 
@@ -7,7 +7,7 @@ ERRORS=0
 for E in $EXPORTS; do
 	DUPES=`sort $E | uniq -d`
 	NUM_DUPES=`echo -n "$DUPES" | wc -l`
-	if [[ "$NUM_DUPES" != 0 ]]; then
+	if [ $NUM_DUPES -gt 0 ]; then
 		echo "There are $NUM_DUPES duplicate symbols in '$E': $DUPES"
 		ERRORS=1
 	fi

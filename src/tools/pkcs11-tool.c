@@ -866,14 +866,14 @@ int main(int argc, char * argv[])
 			break;
 		case OPT_SLOT_DESCRIPTION:
 			if (opt_slot_set) {
-				fprintf(stderr, "Error: Only one of --slot, --slot-label, --slot-index or --token-label can be used\n");
+				fprintf(stderr, "Error: Only one of --slot, --slot-description, --slot-index or --token-label can be used\n");
 				util_print_usage_and_die(app_name, options, option_help, NULL);
 			}
 			opt_slot_description = optarg;
 			break;
 		case OPT_SLOT_INDEX:
 			if (opt_slot_set || opt_slot_description) {
-				fprintf(stderr, "Error: Only one of --slot, --slot-label, --slot-index or --token-label can be used\n");
+				fprintf(stderr, "Error: Only one of --slot, --slot-description, --slot-index or --token-label can be used\n");
 				util_print_usage_and_die(app_name, options, option_help, NULL);
 			}
 			opt_slot_index = (CK_ULONG) strtoul(optarg, NULL, 0);
@@ -885,7 +885,7 @@ int main(int argc, char * argv[])
 			break;
 		case OPT_TOKEN_LABEL:
 			if (opt_slot_set || opt_slot_description || opt_slot_index_set) {
-				fprintf(stderr, "Error: Only one of --slot, --slot-label, --slot-index or --token-label can be used\n");
+				fprintf(stderr, "Error: Only one of --slot, --slot-description, --slot-index or --token-label can be used\n");
 				util_print_usage_and_die(app_name, options, option_help, NULL);
 			}
 			opt_token_label = optarg;
@@ -1133,7 +1133,7 @@ int main(int argc, char * argv[])
 				fprintf(stderr, "Using slot with index %lu (0x%lx)\n", opt_slot_index, opt_slot);
 			} else {
 				fprintf(stderr, "Slot with index %lu (counting from 0) is not available.\n", opt_slot_index);
-				fprintf(stderr, "You must specify a valid slot with either --slot, --slot-index or --slot-label.\n");
+				fprintf(stderr, "You must specify a valid slot with either --slot, --slot-description, --slot-index or --token-label.\n");
 				err = 1;
 				goto end;
 			}
@@ -2745,6 +2745,12 @@ static int gen_keypair(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 		n_privkey_attr++;
 	}
 
+	if (opt_is_extractable != 0) {
+		FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_EXTRACTABLE,
+				&_true, sizeof(_true));
+		n_privkey_attr++;
+	}
+
 	if (opt_allowed_mechanisms_len > 0) {
 		FILL_ATTR(privateKeyTemplate[n_privkey_attr],
 			CKA_ALLOWED_MECHANISMS, opt_allowed_mechanisms,
@@ -3234,7 +3240,7 @@ static int write_object(CK_SESSION_HANDLE session)
 	if (opt_attr_from_file) {
 		if (!(f = fopen(opt_attr_from_file, "rb")))
 			util_fatal("Couldn't open file \"%s\"", opt_attr_from_file);
-		certdata_len = fread(certdata, 1, sizeof(certdata), f);
+		certdata_len = fread(certdata, 1, sizeof(certdata) - 1, f);
 		fclose(f);
 		if (certdata_len < 0)
 			util_fatal("Couldn't read from file \"%s\"", opt_attr_from_file);
