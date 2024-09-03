@@ -167,7 +167,7 @@ jobs:
           path: ./*
           key: ${{ runner.os }}-${{ github.sha }}
       - name: Pull mingw build artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4.1.7
         with:
           name: opensc-build-mingw
       - run: git config --global user.email "builds@github.com"
